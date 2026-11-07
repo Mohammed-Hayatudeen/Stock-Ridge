@@ -57,6 +57,14 @@ A deployment is a separate authorized operation:
 npm run worker:deploy
 ```
 
+For an authorized agent terminal with GitHub, Turso and Cloudflare egress, the complete push-and-deploy procedure is also available as one fail-fast command. It reads credentials from the ignored `.env.deploy`, prints no secrets, and refuses to run on any other branch:
+
+```bash
+./tools/agent-deploy.sh
+```
+
+In the restricted Arena sandbox, GitHub Actions can provide the external egress instead. The `Deploy StockRidge production` workflow runs on pushes to `arena/710a3fbd-stock-ridge`, but requires the five repository Actions secrets named in `.github/workflows/deploy.yml`; repository-secret administration cannot be bypassed by the workflow.
+
 ## Electron development and builds
 
 Development window (uses this checkout's `public/`):
