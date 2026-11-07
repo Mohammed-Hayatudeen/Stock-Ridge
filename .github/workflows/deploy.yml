@@ -2,6 +2,9 @@ name: Deploy StockRidge production
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - arena/710a3fbd-stock-ridge
 
 permissions:
   contents: read
