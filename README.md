@@ -15,7 +15,7 @@ Repository: **https://github.com/Mohammed-Hayatudeen/Stock-Ridge**
 
 ## Source recovery status
 
-The supplied `o.txt` was a concatenated partial source export. The recoverable API, domain, schema, storage and wrapper code has been separated into this tree. The export did **not** contain `public/js/app.js`, 28 files under `public/js/views/`, or several small browser helpers. `npm run check` lists every missing referenced asset and intentionally blocks distributable client builds until the original files are restored. Placeholders have not been substituted for business screens.
+The supplied `o.txt` was a concatenated partial source export. The recoverable API, domain, schema, storage and wrapper code was separated into this tree. The 34 browser files omitted by that export—including `public/js/app.js` and the complete `public/js/views/` directory—were subsequently restored unchanged from the original `10client/stockridge` GitHub source. `npm run check` now verifies all 52 browser assets referenced by `public/index.html` and blocks distribution if any asset goes missing again.
 
 The one-time recovery helper is `tools/recover-upload.py`; it expects the original upload at `/tmp/arena-coding-uploads/o.txt` and is not part of normal development or builds.
 
