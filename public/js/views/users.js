@@ -1,0 +1,1270 @@
+'use strict';
+// =====================================================================
+// public/js/views/users.js — THE PEOPLE, AND WHAT THEY MAY DO
+// =====================================================================
+// A user row is not just a login. It carries four things that decide what the
+// system will let somebody do:
+//
+//   ROLE     — what they may open. MANAGER is a single stored role; the branch a
+//              person belongs to is what scopes them, not a role per shop.
+//   BRANCH   — WHERE their numbers come from. This is the only scoping truth.
+//   COMMISSION — what they earn, calculated on NET revenue so staff are never
+//              paid out of VAT that was never the business's money.
+//   PIN      — the credential. It is hashed, never readable, and only ever shown
+//              once, at the moment it is issued.
+//
+// Two decisions worth stating because they surprise people:
+//
+//   * Nobody can change their own role, branch or active flag here. Self-service
+//     privilege changes are how an "innocent" edit becomes a different person.
+//   * Deactivating somebody with an open till is refused unless forced, because
+//     a closed drawer that nobody counted is a shortage with no owner.
+// =====================================================================
+(function (global) {
+  const SR = global.SR;
+  const ui = SR.ui;
+  const U = SR.util;
+
+  const ROLE_LABELS = [
+    { value: 'STAFF', label: 'Staff — sell, take payment, clock in' },
+    { value: 'MANAGER', label: 'Manager — everything at their branch' },
+    { value: 'OWNER', label: 'Owner — every business and every branch' },
+    { value: 'ADMIN', label: 'Administrator — the deployment itself' },
+  ];
+  // WHAT THIS PERSON MAY HAND OUT, not what exists. `SR.state.canCreateRole` mirrors
+  // `canManageUser(actor, { role })` on the route, so an owner is no longer offered "Owner"
+  // (refused: "You are a Owner and cannot create a Owner"), and a manager is offered Staff only.
+  const ROLES = ROLE_LABELS;
+  /** The roles THIS person may hand out — the create form and the role filter use these. */
+  const creatableRoles = () => ROLE_LABELS.filter((r) => SR.state.canCreateRole(r.value));
+  // Co-owner is a form choice, not a stored role. The route records OWNER plus
+  // the businesses ticked. Offering it only where the route will accept it.
+  function createRoleOptions() {
+    const rows = creatableRoles().slice();
+    if (SR.state.canAppointCoOwner && SR.state.canAppointCoOwner()) {
+      const at = rows.findIndex((r) => r.value === 'OWNER');
+      const co = { value: 'CO_OWNER', label: 'Co-owner — all, one, or a couple of the businesses' };
+      if (at >= 0) rows.splice(at + 1, 0, co);
+      else rows.push(co);
+    }
+    return rows;
+  }
+
+  async function render(ctx) {
+    ctx.setTitle('Staff');
+    const state = {
+      q: '', role: '', branch: ctx.query.branch_id || '', active: '1',
+      page: 0, pageSize: 50,
+      tab: ctx.query.tab || 'team',
+    };
+
+    const wrap = ui.h('div', { class: 'stack' });
+    wrap.appendChild(ui.h('div', { class: 'page-head' },
+      ui.h('div', {},
+        ui.h('h1', {}, 'Staff & access'),
+        ui.h('p', { class: 'sub' }, 'Who works here, where, and what the system lets them do. Open a person to move them to another business. The request, the agreement and both businesses stay on the record. Sales already made stay on the original books.')),
+      ui.h('div', { class: 'actions' },
+        (SR.state.isOwner() || SR.state.isAdmin()) ? ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.openMessageComposer() }, 'Send a message') : null,
+        SR.state.atLeast('MANAGER') ? ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openCreate() }, 'Add someone') : null,
+        SR.state.atLeast('MANAGER') ? ui.h('button', { class: 'btn btn-sm', onClick: () => openCoverage() }, 'Who was here on…') : null,
+        SR.exporter.buttons((format) => exportList(format)))));
+
+    const tabs = ui.h('div', { class: 'tabs' });
+    for (const [key, label] of [['team', 'The team'], ['transfers', 'Transfers'], ['sessions', 'Signed in now']]) {
+      tabs.appendChild(ui.h('button', {
+        class: `tab ${state.tab === key ? 'is-active' : ''}`,
+        onClick: (ev) => {
+          state.tab = key;
+          for (const b of ev.currentTarget.parentElement.children) b.classList.remove('is-active');
+          ev.currentTarget.classList.add('is-active');
+          load();
+        },
+      }, label));
+    }
+    wrap.appendChild(tabs);
+
+    const toolbar = ui.h('div', { class: 'card' }, ui.h('div', { class: 'card-body row' }));
+    const search = ui.h('input', { type: 'search', placeholder: 'Name, username or phone', value: state.q, style: { maxWidth: '260px' } });
+    search.addEventListener('input', ui.debounceInput(search, (v) => { state.q = v; state.page = 0; load(); }, 300));
+    const roleSel = ui.h('select', { onchange: (e) => { state.role = e.target.value; state.page = 0; load(); } });
+    roleSel.appendChild(ui.h('option', { value: '' }, 'Any role'));
+    for (const r of ROLES) roleSel.appendChild(ui.h('option', { value: r.value, selected: r.value === state.role }, U.titleCase(r.value)));
+    const branchSel = ui.h('select', { onchange: (e) => { state.branch = e.target.value; state.page = 0; load(); } });
+    branchSel.appendChild(ui.h('option', { value: '' }, 'Any branch'));
+    for (const b of SR.state.branches()) branchSel.appendChild(ui.h('option', { value: b.id, selected: String(b.id) === String(state.branch) }, b.name));
+    const activeSel = ui.h('select', { onchange: (e) => { state.active = e.target.value; state.page = 0; load(); } });
+    for (const [v, l] of [['1', 'Active'], ['0', 'Deactivated'], ['', 'Everyone']]) {
+      activeSel.appendChild(ui.h('option', { value: v, selected: v === state.active }, l));
+    }
+    toolbar.firstElementChild.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Search'), search));
+    toolbar.firstElementChild.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Role'), roleSel));
+    toolbar.firstElementChild.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Branch'), branchSel));
+    toolbar.firstElementChild.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Status'), activeSel));
+    wrap.appendChild(toolbar);
+
+    const host = ui.h('div', {});
+    wrap.appendChild(host);
+
+    async function load() {
+      host.replaceChildren(ui.skeleton(7));
+      try {
+        if (state.tab === 'sessions') return renderSessions(await SR.api.get('/api/sessions', { query: SR.state.query({}) }));
+        if (state.tab === 'transfers') return renderTransfers();
+        renderTeam(await SR.api.get('/api/users', {
+          query: SR.state.query({
+            q: state.q || undefined,
+            role: state.role || undefined,
+            branch_id: state.branch || undefined,
+            active: state.active === '' ? undefined : state.active,
+            limit: state.pageSize, offset: state.page * state.pageSize,
+          }),
+        }));
+      } catch (err) {
+        if (err.isOffline) {
+          const all = await SR.store.all('users', { where: (u) => !Number(u.is_deleted) });
+          renderTeam({ data: all, paging: { total: all.length }, _offline: true });
+          return;
+        }
+        host.replaceChildren(ui.errorBlock(err, { retry: { label: 'Try again', run: load } }));
+      }
+    }
+
+    // ---------------------------------------------------------------- team
+    function renderTeam(data) {
+      const rows = data.data || data.records || [];
+      const total = (data.paging && data.paging.total != null) ? data.paging.total : rows.length;
+      const stack = ui.h('div', { class: 'stack' });
+      if (data._offline) {
+        stack.appendChild(ui.h('div', { class: 'alert alert-warn' },
+          'Offline — this is the staff list mirrored on this device. Roles follow each person to whichever device they sign in on, so this copy can be out of date.'));
+      }
+
+      const byRole = {};
+      for (const u of rows) {
+        const label = Number(u.grant_count) > 0 ? 'Co-owner' : (u.roleLabel || u.role);
+        byRole[label] = (byRole[label] || 0) + 1;
+      }
+      stack.appendChild(ui.h('div', { class: 'kpis' },
+        ui.kpi({ label: 'People', value: U.qty(total) }),
+        ...['Staff', 'STAFF', 'Manager', 'MANAGER', 'Co-owner', 'Owner', 'OWNER', 'ADMIN'].filter((r) => byRole[r]).map((r) => ui.kpi({ label: U.titleCase(r), value: U.qty(byRole[r]) }))));
+
+      stack.appendChild(ui.dataCard({
+        title: 'The team',
+        table: ui.renderTable({
+          exportable: false,
+          columns: [
+            {
+              key: 'full_name',
+              label: 'Name',
+              render: (u) => ui.h('div', {},
+                ui.h('div', {}, u.full_name || u.username),
+                ui.h('div', { class: 'hint' }, [u.username ? `@${u.username}` : null, u.phone].filter(Boolean).join(' · '))),
+            },
+            { key: 'role', label: 'Role', render: (u) => ui.badge(u.roleLabel ? U.titleCase(u.roleLabel) : U.titleCase(u.role), u.role === 'STAFF' ? 'badge-mute' : 'badge-info') },
+            { key: 'job_title', label: 'Job', render: (u) => u.job_title || '—' },
+            { key: 'branch_name', label: 'Branch', render: (u) => {
+              if (u.branch_name) return ui.h('div', {}, u.branch_name, u.business_name ? ui.h('div', { class: 'hint' }, u.business_name) : null);
+              if (u.role === 'MANAGER') return ui.h('div', {},
+                ui.badge('General Manager', 'badge-violet'),
+                ui.h('div', { class: 'hint' }, u.owned_businesses || u.business_name || 'No business'));
+              if (u.role === 'OWNER' && Number(u.grant_count) > 0) return ui.badge(u.owned_businesses || u.business_name || 'chosen businesses', 'badge-violet');
+              if (u.role === 'OWNER' || u.role === 'ADMIN') return ui.badge('all businesses', 'badge-violet');
+              return '—';
+            } },
+            { key: 'revenue_30d', label: 'Sold (30d)', align: 'right', render: (u) => (Number(u.revenue_30d) ? U.money(u.revenue_30d) : '—') },
+            { key: 'commission_rate_pct', label: 'Commission', align: 'right', render: (u) => (Number(u.commission_rate_pct) ? `${u.commission_rate_pct}%` : '—') },
+            { key: 'last_login_at', label: 'Last seen', render: (u) => (u.last_login_at ? U.relTime(u.last_login_at) : 'never') },
+            { key: 'is_active', label: 'Status', render: (u) => (Number(u.is_active) ? ui.badge('active', 'badge-good') : ui.badge('deactivated', 'badge-mute')) },
+          ],
+          rows,
+          onRowClick: (u) => openEdit(u),
+          emptyTitle: 'Nobody matches',
+          emptyMessage: state.q ? 'Try part of a name or a phone number.' : 'Add the people who work here so their sales, their till and their clock-ins have somewhere to land.',
+        }),
+        actions: [SR.state.atLeast('MANAGER') ? ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openCreate() }, 'Add someone') : null].filter(Boolean),
+        pager: total > state.pageSize ? ui.pager({
+          page: state.page, pageSize: state.pageSize, total,
+          onPage: (p) => { state.page = p; load(); },
+          onSize: (s) => { state.pageSize = s; state.page = 0; load(); },
+        }) : null,
+      }));
+      host.replaceChildren(stack);
+    }
+
+    // ----------------------------------------------------------- transfers
+    /**
+     * WHAT IS WAITING FOR A DECISION.
+     *
+     * Two lists, and they answer different questions. The first is what THIS person
+     * has been asked to decide — a manager answers for their own branch, and the person
+     * arriving is the one they will be accountable for. The second is what concerns
+     * them personally: a move they asked for, or a move somebody has asked for them,
+     * which is exactly what a cashier needs to see when a transfer is described to them
+     * as already arranged.
+     *
+     * ACCEPT AND REFUSE ARE BOTH HERE, side by side and plainly labelled, because a
+     * screen that only offers "accept" is a screen that turns a decision into a
+     * notification.
+     */
+    async function renderTransfers() {
+      const stack = ui.h('div', { class: 'stack' });
+      stack.appendChild(ui.h('div', { class: 'alert alert-info' },
+        'A move is a question first, including a move from one business to another. The person keeps working where they are, and every sale already recorded stays on that business, until the branch receiving them agrees. The request, the answer, both businesses and who decided stay on the record.'));
+      let waiting = { data: [] };
+      let mine = { data: [] };
+      try {
+        if (SR.state.atLeast('MANAGER')) waiting = await SR.api.get('/api/users/transfers/pending', { query: SR.state.query({ limit: 100 }) });
+        mine = await SR.api.get('/api/users/transfers/pending/mine');
+      } catch (err) {
+        stack.appendChild(ui.errorBlock(err, { retry: { label: 'Try again', run: load } }));
+        host.replaceChildren(stack);
+        return;
+      }
+      const rows = waiting.data || [];
+      stack.appendChild(ui.dataCard({
+        title: SR.state.atLeast('MANAGER') ? `${rows.length} waiting for your decision` : 'Waiting for a decision',
+        table: ui.renderTable({
+          columns: [
+            { key: 'full_name', label: 'Who', render: (r) => ui.h('div', {},
+                ui.h('div', {}, r.full_name || r.username),
+                ui.h('div', { class: 'hint' }, [r.username ? `@${r.username}` : null, U.titleCase(r.role)].filter(Boolean).join(' · '))) },
+            { key: 'from_branch_name', label: 'From', render: (r) => placeLabel(r.from_branch_name, r.from_business_name) },
+            { key: 'to_branch_name', label: 'To', render: (r) => ui.h('strong', {}, placeLabel(r.to_branch_name, r.to_business_name)) },
+            { key: 'requested_by_name', label: 'Asked by', render: (r) => r.requested_by_name || '—' },
+            { key: 'requested_at', label: 'Asked', render: (r) => U.relTime(r.requested_at) },
+            { key: 'reason', label: 'Why', render: (r) => ui.h('span', { class: 'hint' }, r.reason || '—') },
+            // THE DECISION IS A COLUMN, not a hover menu: these buttons are the whole
+            // point of the screen, and a decision buried behind a row click is one
+            // nobody finds.
+            { key: 'act', label: '', render: (r) => ui.h('div', { class: 'btn-row' },
+                ui.h('button', { class: 'btn btn-sm btn-primary', onClick: (ev) => decide(ev, r, 'accept') }, 'Accept'),
+                ui.h('button', { class: 'btn btn-sm', onClick: (ev) => decide(ev, r, 'reject') }, 'Refuse')) },
+          ],
+          rows,
+          emptyTitle: 'Nothing is waiting',
+          emptyMessage: 'When somebody asks to move a member of staff into your branch, it appears here for you to accept or refuse.',
+        }),
+      }));
+      const mineRows = mine.data || [];
+      if (mineRows.length) {
+        stack.appendChild(ui.dataCard({
+          title: 'Involving you',
+          table: ui.renderTable({
+            columns: [
+              { key: 'full_name', label: 'Person', render: (r) => r.full_name || r.username },
+              { key: 'from_branch_name', label: 'From', render: (r) => placeLabel(r.from_branch_name, r.from_business_name) },
+              { key: 'to_branch_name', label: 'To', render: (r) => placeLabel(r.to_branch_name, r.to_business_name) },
+              { key: 'requested_by_name', label: 'Asked by', render: (r) => r.requested_by_name || '—' },
+              { key: 'status', label: 'State', render: () => ui.badge('waiting', 'badge-warn') },
+              { key: 'act', label: '', render: (r) => ui.h('button', { class: 'btn btn-sm', onClick: () => withdraw(r) }, 'Withdraw') },
+            ],
+            rows: mineRows,
+            emptyTitle: '',
+          }),
+        }));
+      }
+      host.replaceChildren(stack);
+    }
+
+    /** Answer a transfer. A refusal may carry a reason, and the reason is kept. */
+    async function decide(ev, row, what) {
+      const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+      const label = what === 'accept' ? 'Accept' : 'Refuse';
+      const fromPlace = placeLabel(row.from_branch_name, row.from_business_name);
+      const toPlace = placeLabel(row.to_branch_name, row.to_business_name);
+      const cross = row.from_business_name && row.to_business_name && row.from_business_name !== row.to_business_name;
+      if (what === 'accept') {
+        const ok = await ui.confirmDialog({
+          danger: false,
+          title: `Accept ${row.full_name || row.username}?`,
+          // Said in full, because accepting is the moment a person's books change.
+          message: cross
+            ? `${row.full_name || row.username} will start working at ${toPlace}. Sales, attendance and till counts already recorded stay on ${row.from_business_name}. They will be signed out, so the next sign-in is on ${row.to_business_name}. The date, both businesses and your name are written against this decision.`
+            : `${row.full_name || row.username} will start working at ${toPlace} and will be able to see its sales, its stock and its cash. Their record of where they have worked keeps the date and your name against this decision.`,
+          confirmLabel: 'Accept the move',
+        });
+        if (!ok) return;
+      }
+      let reason = null;
+      if (what === 'reject') {
+        // READ WITHOUT `required`, AND THAT IS THE DESIGN: refusing a transfer is
+        // allowed to be brief, and the placeholder says what would be useful rather
+        // than what is mandatory. `null` means the dialog was cancelled.
+        reason = await ui.promptDialog({
+          title: `Refuse the move to ${toPlace}?`,
+          label: `Why is this being refused? (optional — ${row.full_name || row.username} stays at ${fromPlace})`,
+          placeholder: 'We have no counter free for another cashier this quarter.',
+          hint: 'Kept on the record. It is what the owner reads the next time this is asked.',
+          multiline: true,
+        });
+        if (reason === null) return; // cancelled
+      }
+      // THE PATH IS WRITTEN OUT, one literal per action, so the frontend-contract test
+      // can see which endpoint this calls. Building it as `.../${what}` hid the two real
+      // paths behind a variable and the checker reported a route that does not exist —
+      // which is exactly what it is for, and the fix is to spell them.
+      const url = what === 'accept'
+        ? `/api/users/transfers/${encodeURIComponent(row.id)}/accept`
+        : `/api/users/transfers/${encodeURIComponent(row.id)}/reject`;
+      if (btn) btn.disabled = true;
+      try {
+        const res = await SR.api.post(url, reason ? { reason } : {});
+        ui.ok(res.message || `${label}ed.`);
+        load();
+      } catch (err) {
+        ui.apiError(err);
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    /** Withdraw a question that concerns me. */
+    async function withdraw(row) {
+      const ok = await ui.confirmDialog({
+        title: 'Withdraw this request?',
+        message: `Nobody will be asked to decide, and ${row.full_name || row.username} stays at ${row.from_branch_name || 'their branch'}.`,
+        confirmLabel: 'Withdraw',
+      });
+      if (!ok) return;
+      try {
+        const res = await SR.api.post(`/api/users/transfers/${encodeURIComponent(row.id)}/cancel`, {});
+        ui.ok(res.message || 'Withdrawn.');
+        load();
+      } catch (err) { ui.apiError(err); }
+    }
+
+    // ------------------------------------------------------ move & history
+    /** Branch and business, so a move between books is not just a shop name. */
+    function placeLabel(branch, business) {
+      if (branch && business) return `${branch} · ${business}`;
+      return branch || business || '—';
+    }
+
+    /**
+     * ASK FOR A MOVE FROM HERE, including a move to another business.
+     *
+     * The screen says plainly that this does not move anybody yet, and that sales
+     * already recorded stay on the business that earned them. An owner who believes
+     * they have rewritten last month's books is worse off than one who knows they
+     * have asked.
+     */
+    function openMove(u) {
+      const body = ui.h('div', { class: 'stack' });
+      const from = placeLabel(u.branch_name, u.business_name);
+      body.appendChild(ui.h('p', {}, `${u.full_name || u.username} works at ${from} now.`));
+      body.appendChild(ui.h('div', { class: 'alert alert-info' },
+        'Asking does not move them. They keep working where they are until the branch receiving them agrees. Sales, attendance and till counts already recorded stay on the original business. The request, the answer, both businesses and who decided are written into their record and the audit trail.'));
+      const branchSel = ui.h('select', {});
+      const reason = ui.h('input', { type: 'text', maxlength: '300', placeholder: 'Why are they moving? (optional, kept on the record)', autocomplete: 'off' });
+      const note = ui.h('div', { class: 'hint' }, 'Choose the branch they will work at. The business is the one that branch belongs to.');
+      body.appendChild(ui.h('label', { class: 'ctl' }, 'Move to'));
+      body.appendChild(branchSel);
+      body.appendChild(note);
+      body.appendChild(ui.h('label', { class: 'ctl' }, 'Why (optional)'));
+      body.appendChild(reason);
+      const go = ui.h('button', { class: 'btn btn-primary', disabled: true }, 'Ask for the move');
+      const m = ui.openModal({
+        title: 'Move to another business',
+        body,
+        footer: [ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel'), go],
+        size: 'narrow',
+      });
+      function paint(rows) {
+        const options = (rows || [])
+          .filter((b) => String(b.id) !== String(u.branch_id || '') && Number(b.is_active) !== 0)
+          .slice()
+          .sort((a, b) => String(a.business_name || '').localeCompare(String(b.business_name || '')) || String(a.name || '').localeCompare(String(b.name || '')));
+        branchSel.replaceChildren();
+        if (!options.length) {
+          note.textContent = 'There is no other open branch to move them to. Open a branch on the business that should receive them.';
+          go.disabled = true;
+          return;
+        }
+        for (const b of options) {
+          branchSel.appendChild(ui.h('option', {
+            value: b.id,
+            'data-business': b.business_name || '',
+          }, placeLabel(b.name, b.business_name)));
+        }
+        go.disabled = false;
+        const refresh = () => {
+          const opt = branchSel.options[branchSel.selectedIndex];
+          const toBiz = opt ? opt.getAttribute('data-business') : '';
+          const cross = toBiz && u.business_name && toBiz !== u.business_name;
+          note.textContent = cross
+            ? `This leaves ${u.business_name} and joins ${toBiz}. Past sales stay on ${u.business_name}. New sales, from the day ${toBiz} accepts them, are ${toBiz}'s.`
+            : 'They stay on the same business. The branch receiving them still has to agree.';
+        };
+        branchSel.onchange = refresh;
+        refresh();
+      }
+      paint(SR.state.branches() || []);
+      SR.api.get('/api/branches').then((res) => {
+        if (branchSel.isConnected) paint((res && res.data) || []);
+      }).catch(() => {});
+      go.addEventListener('click', async () => {
+        if (!branchSel.value) return;
+        go.disabled = true;
+        try {
+          const res = await SR.api.post(`/api/users/${encodeURIComponent(u.id)}/transfer`, {
+            to_branch_id: branchSel.value,
+            reason: String(reason.value || '').trim() || undefined,
+          });
+          ui.ok(res.message || 'Asked.');
+          m.close();
+          load();
+        } catch (err) {
+          ui.apiError(err);
+          go.disabled = false;
+        }
+      });
+    }
+
+    /** "Who could see the Minna till on 14 March?" — asked after something has gone missing. */
+    function openCoverage() {
+      const branchSel = ui.h('select', {}, SR.state.branches().map((b) => ui.h('option', { value: b.id }, b.name)));
+      const date = ui.h('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
+      const out = ui.h('div', {});
+      const body = ui.h('div', { class: 'stack' },
+        ui.h('p', { class: 'sub' }, 'Read from the assignment history, so a person who has since moved or been deactivated is still listed for the days they were actually here.'),
+        ui.h('div', { class: 'row' }, branchSel, date,
+          ui.h('button', { class: 'btn btn-primary', onClick: async (ev) => {
+            ev.currentTarget.disabled = true;
+            out.replaceChildren(ui.loading('Reading the history…'));
+            try {
+              const res = await SR.api.get('/api/assignment-history', { query: { branch_id: branchSel.value, at: date.value } });
+              const rows = res.data || [];
+              out.replaceChildren(rows.length
+                ? ui.renderTable({
+                    columns: [
+                      { key: 'full_name', label: 'Who', render: (r) => ui.h('div', {},
+                          ui.h('div', {}, r.full_name || r.username),
+                          ui.h('div', { class: 'hint' }, `@${r.username}`)) },
+                      { key: 'role', label: 'Role', render: (r) => U.titleCase(r.role) },
+                      { key: 'is_active', label: 'Now', render: (r) => (Number(r.is_active) ? ui.badge('still here', 'badge-good') : ui.badge('deactivated since', 'badge-mute')) },
+                    ],
+                    rows,
+                  })
+                : ui.empty({ title: 'Nobody', message: `No assignment history places anybody at ${branchSel.options[branchSel.selectedIndex].text} on ${date.value}.` }));
+            } catch (err) {
+              out.replaceChildren(ui.h('div', { class: 'alert alert-warn' }, (err && err.message) || 'That could not be read.'));
+            } finally { ev.currentTarget.disabled = false; }
+          } }, 'Who was here?')),
+        out);
+      ui.openModal({ title: 'Who could see this branch on that day?', body, size: 'wide' });
+    }
+
+    /** One person's assignments, newest first. */
+    function openHistory(u) {
+      const out = ui.h('div', {}, ui.loading('Reading their history…'));
+      const body = ui.h('div', { class: 'stack' },
+        ui.h('p', { class: 'sub' }, `Every move for ${u.full_name || u.username}, from the day the record was created through to the business they work in now. A move between businesses names both. Sales already recorded are not rewritten.`), out);
+      const m = ui.openModal({ title: 'Where they have worked', body, size: 'wide' });
+      SR.api.get(`/api/users/${encodeURIComponent(u.id)}/assignment-history`).then((res) => {
+        const rows = res.data || [];
+        out.replaceChildren(rows.length
+          ? ui.renderTable({
+              columns: [
+                { key: 'changed_at', label: 'When', render: (r) => U.date(r.changed_at) },
+                { key: 'from_branch_name', label: 'From', render: (r) => placeLabel(r.from_branch_name, r.from_business_name) },
+                { key: 'to_branch_name', label: 'To', render: (r) => placeLabel(r.to_branch_name, r.to_business_name) },
+                { key: 'reason', label: 'Why', render: (r) => ui.h('span', { class: 'hint' }, r.reason || '—') },
+                { key: 'changed_by_name', label: 'Decided by', render: (r) => r.changed_by_name || '—' },
+              ],
+              rows,
+            })
+          : ui.empty({ title: 'No history', message: 'This account has no recorded assignment, which should only be true of a user created before this feature existed.' }));
+        if (res.pending) {
+          out.appendChild(ui.h('div', { class: 'alert alert-info', style: { marginTop: '10px' } },
+            `A move to ${placeLabel(res.pending.to_branch_name, res.pending.to_business_name)} is waiting for somebody there to agree to it. Until then they stay where they are, and sales already recorded stay on the original business.`));
+        }
+      }).catch((err) => { out.replaceChildren(ui.h('div', { class: 'alert alert-warn' }, (err && err.message) || 'That could not be read.')); });
+      return m;
+    }
+
+    // ------------------------------------------------------------ sessions
+    function renderSessions(data) {
+      const rows = data.data || [];
+      host.replaceChildren(ui.h('div', { class: 'stack' },
+        ui.h('div', { class: 'alert alert-info' },
+          'An account can be signed in on one device at a time. Signing in on a second device signs the first one out, including a remembered 30-day session. Revoking the row below is how you remove access from a phone that has been lost, sold or borrowed — the token stops working immediately.'),
+        ui.dataCard({
+          title: `${rows.length} signed in`,
+          // EVERY COLUMN READS A FIELD THE API ACTUALLY SENDS. This table used to show
+          // `device_id`, `ip_address`, `created_at` and `expires_at`, and the route sends
+          // `last_ip`, `issued_at` and computes `expires_at` — four columns out of six drawing
+          // an em dash at every row. It is the same defect P13 fixed on the audit trail, found
+          // the same way: by reading the screen against the query instead of against the idea
+          // of the screen. `device_id` now really is a column too (migration 0008).
+          table: ui.renderTable({
+            columns: [
+              { key: 'full_name', label: 'Who', render: (s) => s.full_name || s.username || '—' },
+              { key: 'role', label: 'Role', render: (s) => U.titleCase(s.role) },
+              { key: 'branch_name', label: 'Branch', render: (s) => s.branch_name || 'All branches' },
+              { key: 'device_id', label: 'Device', render: (s) => s.device_id || '—' },
+              { key: 'last_ip', label: 'From', render: (s) => s.last_ip || '—' },
+              { key: 'issued_at', label: 'Signed in', render: (s) => U.relTime(s.issued_at) },
+              { key: 'last_action_at', label: 'Last did something', render: (s) => (s.last_action_at ? U.relTime(s.last_action_at) : '—') },
+              { key: 'expires_at', label: 'Ends on its own', render: (s) => (s.expires_at ? U.watClock(s.expires_at) : '—') },
+              {
+                key: 'revoke',
+                label: '',
+                // THE SAME RULE THE ROUTE ENFORCES: yourself always, somebody below you if you
+                // are a manager or above. The screen offered this only to owners, so a manager
+                // with a cashier's lost phone in front of them could not end that session from
+                // the till — the route allows it, the audit proves it, and the button was
+                // hidden. `SR.state.canManageUser` mirrors `canManageUser` on the server.
+                render: (s) => (SR.state.canManageUser(s)
+                  ? ui.h('button', { class: 'btn btn-xs', onClick: (ev) => { ev.stopPropagation(); revoke(s); } }, 'Sign out')
+                  : ''),
+              },
+            ],
+            rows,
+            emptyTitle: 'Nobody is signed in',
+            emptyMessage: 'Sign-ins appear here as people log in from their devices.',
+          }),
+        })));
+    }
+
+    async function revoke(session) {
+      // The dialog names the DEVICE when there is one and the ADDRESS when there is not, and it
+      // says which of the two is happening: "cut off the phone" and "cut off whatever is coming
+      // from 197.x.x.x" are different decisions with the same button.
+      const where = session.device_id
+        ? `the device “${session.device_id}”`
+        : (session.last_ip ? `whatever is signed in from ${session.last_ip}` : 'that device');
+      const mine = String(session.user_id) === String(SR.state.user && SR.state.user.id);
+      const confirmed = await ui.confirmDialog({
+        title: mine ? 'Sign yourself out here' : 'Sign this device out',
+        message: mine
+          ? 'End your own session? You will have to sign in again — on this device too.'
+          : `End the session for ${session.full_name || session.username} on ${where}?`,
+        confirmLabel: 'Sign out',
+        danger: true,
+        detail: mine
+          ? 'The work you have already saved stays saved.'
+          : 'Anything already saved stays saved. Anything half-entered on that device is lost. They can sign in again with their PIN.',
+      });
+      if (!confirmed) return;
+      try {
+        const res = await SR.api.post(`/api/sessions/${encodeURIComponent(session.user_id)}/revoke`, {});
+        ui.ok(res.message || 'Signed out.');
+        load();
+      } catch (err) { ui.apiError(err); }
+    }
+
+    /**
+     * HOW THIS PERSON SIGNS IN, AND WHAT HAS GONE WRONG DOING IT.
+     *
+     * Two reads and one write, all three of them previously unreachable from the app:
+     * the lock state, the recent attempts, and the override. The override is the one worth
+     * being careful with — it hands an attacker another eight guesses — so it asks for a
+     * REASON, the reason is required by the route, and the whole act lands on the audit trail
+     * with the state it overrode.
+     */
+    function signInSecurity(u) {
+      const card = ui.h('div', { class: 'card' });
+      const body = ui.h('div', { class: 'card-body' });
+      body.appendChild(ui.h('h2', {}, 'Signing in'));
+      body.appendChild(ui.h('p', { class: 'sub' }, 'Failed attempts, lockouts, and the device and address they came from.'));
+      const host = ui.h('div', {});
+      body.appendChild(host);
+      card.appendChild(body);
+
+      async function loadLock() {
+        host.replaceChildren(ui.skeleton(3));
+        let state;
+        try {
+          state = await SR.api.get('/api/auth/lock-state', { query: { username: u.username } });
+        } catch (err) {
+          host.replaceChildren(ui.errorBlock(err, { retry: { label: 'Try again', run: loadLock } }));
+          return;
+        }
+        const fails = Number(state.failed_attempts || 0);
+        const stack = ui.h('div', { class: 'stack' });
+        stack.appendChild(ui.h('div', { class: state.is_locked ? 'alert alert-warn' : 'alert alert-info' },
+          state.is_locked
+            ? `Locked out after ${fails} failed attempt(s). The last was ${U.relTime(state.last_failed_at)}. They cannot sign in here — not even with the right PIN — until an owner clears it or the lockout expires on its own.`
+            : `${fails} failed attempt(s) in the last quarter of an hour. A lockout happens after ${8} of them; the counter falls back to zero on a successful sign-in.`));
+
+        // The override: owner only, as the route is, and only when there is something to clear.
+        if (SR.state.atLeast('OWNER') && state.is_locked) {
+          const clear = ui.h('button', { class: 'btn btn-sm btn-primary' }, 'Clear the lockout');
+          clear.addEventListener('click', async () => {
+            const reason = await ui.promptDialog({
+              title: `Clear the lockout for ${u.full_name || u.username}`,
+              label: 'Why is the lockout being cleared?',
+              required: true,
+              hint: 'This is on the audit trail with your name and the state you overrode. An override without a reason is one nobody can defend later.',
+            });
+            if (!reason) return;
+            await ui.withBusy(clear, async () => {
+              try {
+                const res = await SR.api.post('/api/auth/unlock', { username: u.username, reason: String(reason) });
+                ui.ok(res.message || 'Lockout cleared.');
+                loadLock();
+              } catch (err) { ui.apiError(err); }
+            });
+          });
+          stack.appendChild(ui.h('div', { class: 'row' }, clear,
+            ui.h('span', { class: 'hint' }, 'They sign in with their existing PIN — a lockout is not a PIN reset.')));
+        } else if (SR.state.atLeast('OWNER')) {
+          stack.appendChild(ui.h('div', { class: 'hint' }, 'Nothing to clear: this account is not locked out.'));
+        } else {
+          stack.appendChild(ui.h('div', { class: 'hint' }, 'Only the owner can clear a lockout. Ask them, or wait for it to expire.'));
+        }
+
+        // The attempts log is the owner's read, exactly as the route is.
+        if (SR.state.atLeast('OWNER')) {
+          const attempts = await SR.api.get('/api/auth/attempts', { query: { username: u.username, limit: 10 } }).catch(() => null);
+          const rows = (attempts && attempts.data) || [];
+          stack.appendChild(ui.dataCard({
+            title: 'Recent sign-in attempts',
+            table: ui.renderTable({
+              // THE FIELDS THE ROUTE SENDS. `attempted_at`, `succeeded`, `ip_address`, `user_agent`.
+              columns: [
+                { key: 'attempted_at', label: 'When', render: (r) => U.relTime(r.attempted_at) },
+                { key: 'succeeded', label: 'Result', render: (r) => (Number(r.succeeded) ? 'Signed in' : 'Wrong PIN') },
+                { key: 'ip_address', label: 'From', render: (r) => r.ip_address || '—' },
+                { key: 'user_agent', label: 'Device', render: (r) => String(r.user_agent || '—').slice(0, 60) },
+              ],
+              rows,
+              emptyTitle: 'No attempts recorded',
+              emptyMessage: 'Sign-ins and wrong PINs appear here as they happen.',
+            }),
+          }));
+        }
+        host.replaceChildren(stack);
+      }
+
+      loadLock();
+      return card;
+    }
+
+    // -------------------------------------------------------------- create
+    function openCreate() {
+      const form = ui.h('div', {});
+      // WHAT THE SHELL ALREADY KNOWS, so the select is not blank while the live list is fetched.
+      // The live list is what gets drawn: a branch opened a minute ago is not in the shell yet
+      // (it caches /api/auth/me for five minutes, and opening a branch never refreshed it), which
+      // is how "add an owner" showed an empty branch chooser and then said add a branch.
+      let branchRows = (SR.state.branches() || []).slice();
+      let businessRows = (SR.state.businesses() || []).slice();
+      let listsSettled = branchRows.length > 0 || businessRows.length > 0;
+
+      const branchField = ui.field({
+        label: 'Branch', name: 'branch_id', required: true,
+        options: [{ value: '', label: 'Loading branches…' }],
+        hint: 'A cashier or a branch manager only sees the branch they belong to. A general manager is not pinned to one.',
+      });
+      const reachField = ui.field({
+        label: 'Where they work',
+        name: 'reach',
+        options: [
+          { value: 'branch', label: 'One branch — Branch Manager' },
+          { value: 'all', label: 'Every branch of this business — General Manager' },
+        ],
+        hint: 'A general manager can sell, raise a bill and see stock at every branch of this business. They are not a fifth role, and they do not see another business.',
+      });
+      reachField.hidden = true;
+      const businessField = ui.field({
+        label: 'Business', name: 'business_id',
+        options: [{ value: '', label: 'Choose the business' }],
+        hint: 'A general manager belongs to one business and covers every branch of it.',
+      });
+      businessField.hidden = true;
+      const ownerNote = ui.h('div', { class: 'hint', hidden: true },
+        'An owner reaches every business and every branch, including a business or a branch opened later. They are not pinned to one set of books.');
+      const gmField = ui.h('div', { class: 'field', hidden: true });
+      const gmList = ui.h('div', { class: 'stack' });
+      gmField.appendChild(ui.h('div', { class: 'field-label' }, 'Businesses they manage'));
+      gmField.appendChild(gmList);
+      gmField.appendChild(ui.h('div', { class: 'hint' },
+        'Tick one, or a couple. A general manager covers every branch of those businesses, and no other. They are not put on AquaRidge unless you tick it.'));
+      const ownField = ui.h('div', { class: 'field', hidden: true });
+      const ownList = ui.h('div', { class: 'stack' });
+      ownField.appendChild(ui.h('div', { class: 'field-label' }, 'Businesses they own'));
+      ownField.appendChild(ownList);
+      ownField.appendChild(ui.h('div', { class: 'hint' },
+        'Tick all of them, one, or a couple. A co-owner reaches every branch of the businesses you tick. A business opened later is not theirs until you add it.'));
+      const emptyNote = ui.h('div', { class: 'alert alert-warn', hidden: true });
+
+      form.appendChild(ui.h('div', { class: 'form-grid' },
+        ui.field({ label: 'Full name', name: 'full_name', required: true, placeholder: 'Chidinma Okafor' }),
+        ui.field({ label: 'Username', name: 'username', required: true, hint: 'Lower case, no spaces. This is what they type on the sign-in screen.' }),
+        ui.field({ label: 'Role', name: 'role', required: true, options: createRoleOptions() }),
+        reachField,
+        branchField,
+        businessField,
+        ui.field({ label: 'Job title', name: 'job_title', placeholder: SR.state.moduleOn('dispatch') ? 'Driver, or Partner rider' : 'Sales assistant', hint: SR.state.moduleOn('dispatch') ? 'A driver is Staff. An owned vehicle pays a wage. A partner is paid from the delivery they completed, not from this commission box.' : null }),
+        ui.field({ label: 'Phone', name: 'phone', placeholder: '0803 000 0000' }),
+        ui.field({ label: 'PIN', name: 'pin', type: 'password', required: true, hint: 'Digits only. They can change it after signing in.' }),
+        ui.field({ label: 'Confirm PIN', name: 'confirm_pin', type: 'password', required: true }),
+        ui.field({ label: 'Commission %', name: 'commission_rate_pct', type: 'number', step: '0.01', min: '0', max: '100', hint: 'Paid on NET revenue — the money the business actually earned.' }),
+        ui.field({ label: 'Bank', name: 'bank_name', placeholder: 'GTBank' }),
+        ui.field({ label: 'Account number', name: 'bank_account_no', placeholder: '0123456789' }),
+        ui.field({ label: 'Employed since', name: 'employment_started', type: 'date' })));
+      form.appendChild(ownerNote);
+      form.appendChild(gmField);
+      form.appendChild(ownField);
+      form.appendChild(emptyNote);
+      form.appendChild(ui.h('div', { class: 'hint' }, 'The PIN is stored hashed. Nobody — including you — can read it back. If it is forgotten, issue a new one.'));
+
+      const cancel = ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel');
+      const go = ui.h('button', { class: 'btn btn-primary' }, 'Add them');
+      const m = ui.openModal({ title: 'Add someone to the team', body: form, footer: [cancel, go], size: 'wide' });
+
+      const roleSel = form.querySelector('[name="role"]');
+      const reachSel = form.querySelector('[name="reach"]');
+      const branchSel = branchField.querySelector('select');
+      const businessSel = businessField.querySelector('select');
+
+      function branchLabel(b) {
+        return b.business_name ? `${b.name} · ${b.business_name}` : b.name;
+      }
+      function chosenBusinessIds() {
+        return [...ownList.querySelectorAll('input[data-business]')].filter((el) => el.checked).map((el) => el.value);
+      }
+      function chosenGmIds() {
+        return [...gmList.querySelectorAll('input[data-gm]')].filter((el) => el.checked).map((el) => el.value);
+      }
+      function paintGm(branchId) {
+        const previous = new Set(chosenGmIds());
+        const branchRow = branchRows.find((b) => String(b.id) === String(branchId || ''));
+        const fromBranch = branchRow ? String(branchRow.business_id) : '';
+        gmList.replaceChildren();
+        if (!businessRows.length) {
+          gmList.appendChild(ui.h('div', { class: 'hint' }, 'No business yet.'));
+          return;
+        }
+        for (const b of businessRows) {
+          const checked = previous.size
+            ? previous.has(String(b.id))
+            : (fromBranch ? String(b.id) === fromBranch : businessRows.length === 1);
+          const box = ui.h('input', { type: 'checkbox', value: b.id, 'data-gm': '1', checked: checked });
+          gmList.appendChild(ui.h('label', { class: 'check' }, box, ui.h('span', {}, b.name)));
+        }
+      }
+      function paintOwnership() {
+        const previous = new Set(chosenBusinessIds());
+        ownList.replaceChildren();
+        if (!businessRows.length) {
+          ownList.appendChild(ui.h('div', { class: 'hint' }, 'No business yet.'));
+          return;
+        }
+        const boxes = [];
+        const allBox = ui.h('input', { type: 'checkbox' });
+        ownList.appendChild(ui.h('label', { class: 'check' }, allBox, ui.h('span', {}, 'All businesses')));
+        for (const b of businessRows) {
+          const checked = previous.size ? previous.has(String(b.id)) : businessRows.length === 1;
+          const box = ui.h('input', { type: 'checkbox', value: b.id, 'data-business': '1', checked: checked });
+          boxes.push(box);
+          ownList.appendChild(ui.h('label', { class: 'check' }, box, ui.h('span', {}, b.name)));
+          box.addEventListener('change', syncAll);
+        }
+        function syncAll() {
+          allBox.checked = boxes.length > 0 && boxes.every((box) => box.checked);
+        }
+        allBox.addEventListener('change', () => {
+          for (const box of boxes) box.checked = allBox.checked;
+        });
+        syncAll();
+      }
+      function paintChoices() {
+        const role = roleSel ? String(roleSel.value || '') : '';
+        const general = role === 'MANAGER' && reachSel && reachSel.value === 'all' && SR.state.atLeast('OWNER');
+        reachField.hidden = role !== 'MANAGER' || !SR.state.atLeast('OWNER');
+        const needs = SR.state.roleNeedsBranch(role, { generalManager: general });
+        const kept = branchSel.value;
+        branchSel.replaceChildren();
+        if (!needs) {
+          const blank = general
+            ? 'No branch — a general manager covers every branch of this business'
+            : (role === 'OWNER'
+              ? 'No branch — an owner reaches every branch'
+              : 'No branch — administrators are not pinned to one');
+          branchSel.appendChild(ui.h('option', { value: '' }, blank));
+        }
+        const mineId = String(SR.state.activeBranchId || '');
+        const ordered = branchRows.slice().sort((a, b) => {
+          if (String(a.id) === mineId) return -1;
+          if (String(b.id) === mineId) return 1;
+          return String(a.name).localeCompare(String(b.name));
+        });
+        for (const b of ordered) {
+          const label = String(b.id) === mineId ? `${branchLabel(b)} — where you work` : branchLabel(b);
+          branchSel.appendChild(ui.h('option', { value: b.id }, label));
+        }
+        if (!branchSel.options.length) branchSel.appendChild(ui.h('option', { value: '' }, 'No branch yet'));
+        if ([...branchSel.options].some((o) => o.value === kept)) branchSel.value = kept;
+        else branchSel.value = needs ? (branchSel.options[0] && branchSel.options[0].value) : '';
+        branchSel.required = needs && branchRows.length > 0;
+        const label = branchField.querySelector('.ctl');
+        if (label) label.textContent = needs ? 'Branch *' : 'Branch';
+
+        const keptBiz = businessSel.value;
+        businessSel.replaceChildren();
+        businessSel.appendChild(ui.h('option', { value: '' }, businessRows.length ? 'Choose the business' : 'No business yet'));
+        for (const b of businessRows) businessSel.appendChild(ui.h('option', { value: b.id }, b.name));
+        if ([...businessSel.options].some((o) => o.value === keptBiz && keptBiz)) businessSel.value = keptBiz;
+        else if (businessRows.length === 1) businessSel.value = businessRows[0].id;
+        const ownerSeat = role === 'OWNER';
+        const coSeat = role === 'CO_OWNER';
+        // The business select is for a general manager when the branch cannot
+        // name it. An owner is not asked. A co-owner uses the checklist.
+        // A general manager is not assigned by a hidden branch. The checklist
+        // is the assignment. A stale branch value must not satisfy the form
+        // and then be dropped, which is how every general manager was saved
+        // against the oldest business. The branch they had picked still names
+        // the business to pre-tick, and is read before the select is cleared.
+        const branchBeforeClear = branchSel.value;
+        if (general) branchSel.value = '';
+        businessField.hidden = needs || ownerSeat || coSeat || general || businessRows.length <= 1;
+        branchField.hidden = general || ownerSeat || coSeat;
+        gmField.hidden = !general;
+        ownerNote.hidden = !ownerSeat;
+        ownField.hidden = !coSeat;
+        paintOwnership();
+        if (general) paintGm(branchBeforeClear);
+
+        emptyNote.replaceChildren();
+        if (coSeat && !businessRows.length) {
+          emptyNote.hidden = false;
+          emptyNote.appendChild(ui.h('div', {}, 'There is no business to give a co-owner yet. Create one first. An owner can still be added — they own every business, including one opened later.'));
+          emptyNote.appendChild(ui.h('button', { class: 'btn btn-sm', type: 'button', onClick: () => { m.close(); SR.app.navigate('/businesses'); } }, 'Create a business'));
+        } else if (!businessRows.length && !ownerSeat) {
+          emptyNote.hidden = false;
+          emptyNote.appendChild(ui.h('div', {}, 'There is no business yet. Create one first — its first branch is opened with it. An owner is not pinned to a branch, and can be added either way.'));
+          emptyNote.appendChild(ui.h('button', { class: 'btn btn-sm', type: 'button', onClick: () => { m.close(); SR.app.navigate('/businesses'); } }, 'Create a business'));
+        } else if (needs && !branchRows.length) {
+          emptyNote.hidden = false;
+          emptyNote.appendChild(ui.h('div', {}, 'There is no branch to choose. A cashier or a branch manager has to belong to one — open a branch first. An owner does not, and a general manager covers every branch of the business once a branch exists to cover.'));
+          emptyNote.appendChild(ui.h('button', { class: 'btn btn-sm', type: 'button', onClick: () => { m.close(); SR.app.navigate('/branches'); } }, 'Open a branch'));
+        } else {
+          emptyNote.hidden = true;
+        }
+      }
+      if (roleSel) roleSel.addEventListener('change', paintChoices);
+      paintChoices();
+
+      // THE LIVE LISTS, not the shell's cache. This is what makes a branch opened a minute ago
+      // appear in the chooser instead of the form saying there isn't one.
+      Promise.all([
+        SR.api.get('/api/branches').catch(() => null),
+        SR.api.get('/api/businesses').catch(() => null),
+      ]).then(([br, bz]) => {
+        if (br && Array.isArray(br.data)) branchRows = br.data;
+        if (bz && Array.isArray(bz.data)) businessRows = bz.data;
+        listsSettled = true;
+        if (form.isConnected) paintChoices();
+      }).catch(() => {});
+
+      go.addEventListener('click', async () => {
+        const v = ui.readForm(form);
+        if (!v.pin || String(v.pin) !== String(v.confirm_pin)) { ui.warn('The two PINs must match.'); return; }
+        if (!listsSettled) { ui.warn('Still loading the businesses and branches. One moment, then try again.'); return; }
+        const ownerSeat = v.role === 'OWNER';
+        const coSeat = v.role === 'CO_OWNER';
+        const ownedIds = coSeat ? chosenBusinessIds() : [];
+        if (coSeat && !ownedIds.length) {
+          ui.warn(businessRows.length
+            ? 'Choose the businesses this co-owner owns. That can be all of them, one, or a couple.'
+            : 'Create a business first. A co-owner has to be given at least one.');
+          return;
+        }
+        if (!ownerSeat && !coSeat && !businessRows.length) {
+          ui.warn('Create a business first.');
+          return;
+        }
+        const general = v.role === 'MANAGER' && v.reach === 'all';
+        const gmIds = general ? chosenGmIds() : [];
+        if (general && !SR.state.atLeast('OWNER')) {
+          ui.warn('Only an owner can appoint a general manager.');
+          return;
+        }
+        if (general && !gmIds.length) {
+          ui.warn(businessRows.length
+            ? 'Choose which business this general manager belongs to. Tick one, or a couple. They cover every branch of those businesses, not every business on the deployment.'
+            : 'Create a business first. A general manager has to belong to one.');
+          return;
+        }
+        if (SR.state.roleNeedsBranch(v.role, { generalManager: general }) && !v.branch_id) {
+          ui.warn(branchRows.length
+            ? 'Choose the branch they work at. A cashier or a branch manager with no branch has no scope. An owner does not need one, and a general manager covers every branch of the business.'
+            : 'There is no branch yet. Open a branch first — or add them as an owner, who reaches every branch.');
+          return;
+        }
+        const chosenBranch = (general || ownerSeat || coSeat) ? null : branchRows.find((b) => String(b.id) === String(v.branch_id));
+        const businessId = ownerSeat || coSeat ? null : ((chosenBranch && chosenBranch.business_id)
+          || v.business_id
+          || (businessRows.length === 1 ? businessRows[0].id : null));
+        if (!ownerSeat && !coSeat && !general && !v.branch_id && !businessId) {
+          ui.warn('Choose which business this person belongs to.');
+          return;
+        }
+        await ui.withBusy(form, async () => {
+          try {
+            const res = await SR.api.post('/api/users', {
+              full_name: v.full_name,
+              username: v.username,
+              role: coSeat ? 'OWNER' : v.role,
+              co_owner: coSeat || undefined,
+              general_manager: general || undefined,
+              branch_id: (general || ownerSeat || coSeat) ? null : (v.branch_id || null),
+              business_id: general ? gmIds[0] : (businessId || undefined),
+              business_ids: general ? gmIds : (coSeat ? ownedIds : undefined),
+              job_title: v.job_title || undefined,
+              phone: v.phone || undefined,
+              pin: String(v.pin),
+              confirm_pin: String(v.confirm_pin),
+              commission_rate_pct: v.commission_rate_pct === null ? undefined : Number(v.commission_rate_pct),
+              bank_name: v.bank_name || undefined,
+              bank_account_no: v.bank_account_no || undefined,
+              employment_started: v.employment_started || undefined,
+            });
+            m.close();
+            ui.ok(res.message || `${v.full_name} can now sign in as ${v.username}.`);
+            load();
+          } catch (err) { ui.apiError(err); }
+        });
+      });
+    }
+
+    // ---------------------------------------------------------------- edit
+
+    /**
+     * WHICH BUSINESSES THIS PERSON CAN REACH.
+     *
+     * A group running two businesses — a furniture showroom and an appliance shop,
+     * or a retail counter and its wholesale arm — needs one manager to run both.
+     * Until now the only way was a second account with a second PIN, after which
+     * the audit trail shows two people where there is one.
+     *
+     * Shown to the deployment administrator only, because a grant reaches ACROSS
+     * businesses and a business is a separate legal entity with its own books.
+     * Each toggle saves on its own, immediately: a checkbox that needs a separate
+     * "save" is how somebody ticks a box, closes the modal, and believes they gave
+     * somebody access they did not.
+     */
+    function accessSection(u) {
+      const wrap = ui.h('fieldset', {});
+      wrap.appendChild(ui.h('legend', {}, 'Businesses this person can reach'));
+      const body = ui.h('div', { class: 'stack' });
+      wrap.appendChild(body);
+      body.appendChild(ui.loading('Checking…'));
+
+      async function loadAccess() {
+        let data;
+        try {
+          data = await SR.api.get(`/api/users/${encodeURIComponent(u.id)}/business-access`);
+        } catch (err) {
+          body.replaceChildren(ui.h('div', { class: 'alert alert-warn' },
+            'Could not read the businesses this person can reach. ' + ((err && err.message) || '')));
+          return;
+        }
+        const rows = data.data || [];
+        const reached = rows.filter((b) => b.own || b.viaGrant || data.reachesEverything).length;
+        const list = ui.h('div', { class: 'stack' });
+
+        // WHY the switches are locked, in the words of the case that applies. The
+        // server answers with the reason (`reachesEverythingBy`) rather than the
+        // screen inferring it from the role, because "reaches everything" has
+        // three causes and an owner is the one that surprises people.
+        const byRole = data.reachesEverythingBy;
+        const whyLocked = byRole === 'ROLE:ADMIN'
+          ? `${u.full_name || u.username} is the deployment administrator and reaches every business here by virtue of that role. There is nothing to grant or withdraw.`
+          : byRole === 'ROLE:OWNER'
+            ? `${u.full_name || u.username} is the proprietor and reaches every business and every branch. There is nothing to grant or withdraw.`
+            : byRole === 'NO_BUSINESS_PINNED'
+              ? `${u.full_name || u.username} is not tied to any one business, so every business already reaches them. Put them on a business to confine their view to it.`
+              : null;
+
+        list.appendChild(ui.h('p', { class: 'hint' },
+          whyLocked
+            || (data.canMoveHome
+              ? `Reaching ${reached} of ${rows.length}. Tick the businesses they should cover, and untick the ones they should not — including the one already on their record. A general manager has to keep at least one.`
+              : `Reaching ${reached} of ${rows.length}. Their own business is theirs by being on their record; the others are grants. A grant widens what they can SEE, never what they may DO — the role above still decides that.`)));
+
+        for (const b of rows) {
+          const locked = data.reachesEverything || (b.own && !data.canMoveHome);
+          const box = ui.h('input', { type: 'checkbox', checked: b.own || b.viaGrant || data.reachesEverything, disabled: locked });
+          const line = ui.h('div', { class: 'hint' },
+            b.own
+              ? (data.canMoveHome
+                ? 'On their record. Untick it to take them off this business. If it is the only one, tick another business first.'
+                : 'Their own business — not a grant, and not something to switch off here.')
+              : byRole ? (byRole === 'NO_BUSINESS_PINNED' ? 'Reached — nothing pins them to one business.' : 'Reached by role.')
+                : b.viaGrant && b.grantedAt ? `Granted ${U.date(b.grantedAt)}.` : 'No access yet.');
+          const rowEl = ui.h('label', { class: 'check', style: { marginBottom: '6px', alignItems: 'flex-start' } },
+            box,
+            ui.h('div', {},
+              ui.h('strong', {}, b.name),
+              ui.h('div', { class: 'hint' }, [U.titleCase(String(b.profile_code || '').replace(/_/g, ' ')), Number(b.is_active) ? null : 'inactive'].filter(Boolean).join(' · ')),
+              line));
+
+          if (!locked) {
+            box.addEventListener('change', async () => {
+              const wanted = box.checked;
+              box.disabled = true;
+              try {
+                // `SR.api.post(path, payload)` — the payload is the SECOND argument.
+                // Passing `{ body: { … } }` sent an object with no `business_id` in
+                // it, and the server answered "business id is required" — a message
+                // about the field rather than about the mistake.
+                const res = wanted
+                  ? await SR.api.post(`/api/users/${encodeURIComponent(u.id)}/business-access`, { business_id: b.id })
+                  : await SR.api.del(`/api/users/${encodeURIComponent(u.id)}/business-access/${encodeURIComponent(b.id)}`);
+                ui.ok(res.message || 'Saved.');
+                await loadAccess();
+              } catch (err) {
+                box.checked = !wanted;
+                box.disabled = false;
+                ui.error(err && err.isOffline
+                  ? 'Changing who can reach a business needs a line.'
+                  : (err && err.message) || 'Could not save that.');
+              }
+            });
+          }
+          list.appendChild(rowEl);
+        }
+        body.replaceChildren(list);
+      }
+
+      loadAccess();
+      return wrap;
+    }
+
+    function openEdit(u) {
+      const self = String(u.id) === String(SR.state.user.id);
+      const form = ui.h('div', {});
+      form.appendChild(ui.kv([
+        ['Username', `@${u.username}`],
+        ['Role', U.titleCase(u.roleLabel || u.role)],
+        ['Reach', u.role === 'OWNER' && !Number(u.grant_count)
+          ? 'Every business and every branch'
+          : (u.role === 'OWNER'
+            ? (u.owned_businesses || u.business_name || 'Chosen businesses')
+            : (u.branch_name
+              ? u.branch_name
+              : (u.role === 'MANAGER'
+                ? (u.owned_businesses || u.business_name || 'No business')
+                : 'Every branch')))],
+        ['Role grants', (u.navigation || []).map((n) => U.titleCase(n)).join(', ') || '—'],
+      ]));
+      form.appendChild(ui.h('div', { class: 'form-grid' },
+        ui.field({ label: 'Full name', name: 'full_name', value: u.full_name || '', required: true }),
+        ui.field({ label: 'Job title', name: 'job_title', value: u.job_title || '' }),
+        ui.field({ label: 'Phone', name: 'phone', value: u.phone || '' }),
+        ui.field({ label: 'Email', name: 'email', value: u.email || '' }),
+        ui.field({ label: 'Commission %', name: 'commission_rate_pct', type: 'number', step: '0.01', min: '0', max: '100', value: u.commission_rate_pct == null ? '' : String(u.commission_rate_pct) }),
+        SR.state.atLeast('OWNER') ? ui.field({
+          label: 'Role',
+          name: 'role',
+          options: ROLES.map((r) => ({ value: r.value, label: r.value === 'OWNER' && Number(u.grant_count) > 0 ? 'Co-owner' : U.titleCase(r.value) })),
+          value: u.role,
+          disabled: self,
+          hint: self ? 'You cannot change your own role.' : 'Changing a role takes effect at their next sign-in.',
+        }) : null,
+        SR.state.atLeast('OWNER') && String(u.role).toUpperCase() !== 'OWNER' ? ui.field({
+          label: 'Branch',
+          name: 'branch_id',
+          options: [{ value: '', label: 'No branch — owner, administrator, or general manager' }].concat(SR.state.branches().map((b) => ({ value: b.id, label: b.business_name ? `${b.name} · ${b.business_name}` : b.name }))),
+          value: u.branch_id || '',
+          disabled: self,
+          hint: 'Choosing a branch of another business asks for a transfer. They stay where they are until that branch agrees, and past sales stay on the original books. Leave this empty on a manager to make them a general manager of their current business. A cashier still needs one branch.',
+        }) : null,
+        SR.state.atLeast('OWNER') ? ui.field({
+          label: 'Active',
+          name: 'is_active',
+          type: 'checkbox',
+          value: Number(u.is_active) ? 1 : 0,
+          disabled: self,
+          hint: 'Deactivating keeps every sale, till and clock-in they recorded. It only stops them signing in.',
+        }) : null));
+
+      // SIGNING IN — the locks, the failures behind them, and the owner's way out.
+      //
+      // `GET /api/auth/lock-state`, `GET /api/auth/attempts` and `POST /api/auth/unlock` were
+      // three complete routes that NO SCREEN CALLED. An owner with a cashier locked out at the
+      // counter — the cashier having mistyped their PIN eight times, which on a busy morning
+      // is not an attack — had no way to clear it from the product; the only route was to wait
+      // fifteen minutes or talk to the vendor. The manager, meanwhile, could not see WHO was
+      // locked out at all. All three are reached from here now, with the same gates the routes
+      // enforce (a manager may look, only an owner may clear) and the same field names they
+      // answer with.
+      let ownEditor = null;
+      if (String(u.role).toUpperCase() === 'OWNER' && !Number(u.grant_count)) {
+        form.appendChild(ui.h('div', { class: 'hint' }, 'The proprietor. They own every business and every branch, including a business or a branch opened later.'));
+      }
+      if (String(u.role).toUpperCase() === 'OWNER' && Number(u.grant_count) > 0 && !self && SR.state.canAppointCoOwner && SR.state.canAppointCoOwner()) {
+        ownEditor = ui.h('div', { class: 'field' });
+        ownEditor.appendChild(ui.h('div', { class: 'field-label' }, 'Businesses they own'));
+        const ownList = ui.h('div', { class: 'stack' });
+        ownEditor.appendChild(ownList);
+        ownEditor.appendChild(ui.h('div', { class: 'hint' }, 'Tick all of them, one, or a couple. They reach every branch of those businesses. A business opened later is not theirs until you add it.'));
+        const ownedNow = new Set(String(u.owned_business_ids || u.business_id || '').split(',').map((id) => id.trim()).filter(Boolean));
+        function paintOwned(businesses) {
+          ownList.replaceChildren();
+          if (!businesses.length) {
+            ownList.appendChild(ui.h('div', { class: 'hint' }, 'No business to choose.'));
+            return;
+          }
+          const boxes = [];
+          const allBox = ui.h('input', { type: 'checkbox' });
+          ownList.appendChild(ui.h('label', { class: 'check' }, allBox, ui.h('span', {}, 'All businesses')));
+          for (const b of businesses) {
+            const box = ui.h('input', { type: 'checkbox', value: b.id, 'data-owned': '1', checked: ownedNow.has(String(b.id)) });
+            boxes.push(box);
+            ownList.appendChild(ui.h('label', { class: 'check' }, box, ui.h('span', {}, b.name)));
+            box.addEventListener('change', () => { allBox.checked = boxes.every((el) => el.checked); });
+          }
+          allBox.addEventListener('change', () => { for (const box of boxes) box.checked = allBox.checked; });
+          allBox.checked = boxes.length > 0 && boxes.every((el) => el.checked);
+        }
+        paintOwned(SR.state.businesses() || []);
+        SR.api.get('/api/businesses').then((res) => {
+          if (form.isConnected && res && Array.isArray(res.data)) paintOwned(res.data);
+        }).catch(() => {});
+        ownEditor.collect = () => [...ownList.querySelectorAll('input[data-owned]')].filter((el) => el.checked).map((el) => el.value);
+        form.appendChild(ownEditor);
+      }
+
+      if (SR.state.atLeast('MANAGER')) form.appendChild(signInSecurity(u));
+
+      // The proprietor owns every business, so they can hand a manager a
+      // second one. A co-owner's businesses are the checklist below, not
+      // these grant switches — a switch cannot untick the home business.
+      const mayAssign = SR.state.canAppointCoOwner && SR.state.canAppointCoOwner();
+      if (mayAssign && !self && String(u.role).toUpperCase() !== 'OWNER') form.appendChild(accessSection(u));
+
+      const pinBtn = ui.h('button', { class: 'btn' }, 'Issue a new PIN');
+      // WHERE THEY HAVE WORKED, and the move itself, sit next to the PIN button because
+      // they are the same kind of action: they change what this person can do, and they
+      // are decisions rather than edits.
+      const historyBtn = ui.h('button', { class: 'btn btn-sm', onClick: () => openHistory(u) }, 'Where they have worked');
+      const moveBtn = !self && SR.state.atLeast('OWNER') && !['OWNER', 'ADMIN'].includes(String(u.role || '').toUpperCase())
+        ? ui.h('button', { class: 'btn btn-sm', onClick: () => { m.close(); openMove(u); } }, 'Move to another business')
+        : null;
+      const close = ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Close');
+      const save = ui.h('button', { class: 'btn btn-primary' }, 'Save changes');
+      const m = ui.openModal({ title: u.full_name || u.username, body: form, footer: [historyBtn, moveBtn, pinBtn, ui.h('div', { class: 'spacer' }), close, save].filter(Boolean), size: 'wide' });
+
+      // A branch opened since sign-in is not in the shell's cache, so this select showed only
+      // "No branch" and the save then said add a branch. Ask for the live list when the cache
+      // has nothing to offer.
+      if (!self && !(SR.state.branches() || []).length) {
+        SR.api.get('/api/branches').then((res) => {
+          const rows = (res && res.data) || [];
+          const sel = form.querySelector('[name="branch_id"]');
+          if (!sel || !rows.length || !form.isConnected) return;
+          const current = sel.value;
+          const blank = [...sel.options].find((o) => o.value === '');
+          sel.replaceChildren();
+          sel.appendChild(blank || ui.h('option', { value: '' }, 'No branch — owner, administrator, or general manager'));
+          for (const b of rows) sel.appendChild(ui.h('option', { value: b.id }, b.business_name ? `${b.name} · ${b.business_name}` : b.name));
+          if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+        }).catch(() => {});
+      }
+
+
+      pinBtn.addEventListener('click', async () => {
+        const confirmed = await ui.confirmDialog({
+          title: 'Issue a new PIN',
+          message: `Generate a new PIN for ${u.full_name || u.username}?`,
+          confirmLabel: 'Generate',
+          detail: self
+            ? 'You will be signed out of every device and will need the new PIN to get back in.'
+            : 'They will be signed out of every device immediately. The new PIN is shown once — write it down and hand it over in person.',
+        });
+        if (!confirmed) return;
+        try {
+          const res = await SR.api.post(`/api/users/${encodeURIComponent(u.id)}/reset-pin`, {});
+          m.close();
+          showPin(u, res.pin, res.message);
+          load();
+        } catch (err) { ui.apiError(err); }
+      });
+
+      save.addEventListener('click', async () => {
+        const v = ui.readForm(form);
+        await ui.withBusy(form, async () => {
+          try {
+            const body = {
+              full_name: v.full_name,
+              job_title: v.job_title || null,
+              phone: v.phone || null,
+              email: v.email || null,
+              commission_rate_pct: v.commission_rate_pct === null ? 0 : Number(v.commission_rate_pct),
+            };
+            if (SR.state.atLeast('OWNER') && !self) {
+              if (v.role) body.role = v.role;
+              body.is_active = Number(v.is_active) ? true : false;
+              const roleNow = v.role || u.role;
+              if (String(u.role).toUpperCase() !== 'OWNER') {
+                body.branch_id = v.branch_id ? v.branch_id : null;
+                if (roleNow === 'STAFF' && !body.branch_id) {
+                  ui.warn('A cashier has to belong to one branch.');
+                  return;
+                }
+                if (roleNow === 'MANAGER' && !body.branch_id) body.general_manager = true;
+              }
+              if (ownEditor && roleNow === 'OWNER' && Number(u.grant_count) > 0) {
+                const ids = ownEditor.collect();
+                if (!ids.length) {
+                  ui.warn('Choose the businesses this co-owner owns. That can be all of them, one, or a couple.');
+                  return;
+                }
+                body.business_ids = ids;
+              }
+            }
+            // THE PAYLOAD IS THE SECOND ARGUMENT, not an object holding it. `{ body }`
+            // sent the JSON `{"body":{...}}`, so editing a user saved nothing: the
+            // route read `body.full_name` and found `undefined`, and the screen
+            // reported success. Same defect as the Settings Save button, written in
+            // the shorthand form the sweep's pattern could not see.
+            const res = await SR.api.put(`/api/users/${encodeURIComponent(u.id)}`, body);
+            m.close();
+            ui.ok(res.message || 'Saved.');
+            load();
+          } catch (err) { ui.apiError(err); }
+        });
+      });
+    }
+
+    function showPin(u, pin, message) {
+      const body = ui.h('div', { class: 'stack' });
+      body.appendChild(ui.h('div', { class: 'pin-display' }, pin || '—'));
+      body.appendChild(ui.h('p', {}, message || 'Write this down now: it is shown once and cannot be read back later.'));
+      body.appendChild(ui.h('button', {
+        class: 'btn',
+        onClick: async () => { await ui.copyToClipboard(String(pin || ''), 'PIN copied.'); },
+      }, 'Copy the PIN'));
+      const done = ui.h('button', { class: 'btn btn-primary', onClick: () => m.close() }, 'I have written it down');
+      const m = ui.openModal({ title: `New PIN for ${u.full_name || u.username}`, body, footer: [done], size: 'narrow' });
+    }
+
+    async function exportList(format) {
+      try {
+        await SR.exporter.list({
+          format,
+          filename: 'staff',
+          path: '/api/users',
+          query: SR.state.query({ role: state.role || undefined, branch_id: state.branch || undefined, active: state.active === '' ? undefined : state.active }),
+          mirrorTable: 'users',
+          columns: [
+            { key: 'full_name', label: 'Name' }, { key: 'username', label: 'Username' },
+            { key: 'role', label: 'Role' }, { key: 'job_title', label: 'Job title' },
+            { key: 'branch_name', label: 'Branch' }, { key: 'phone', label: 'Phone' },
+            { key: 'commission_rate_pct', label: 'Commission %' },
+            { key: 'is_active', label: 'Active (1/0)' },
+          ],
+        });
+      } catch (err) { ui.apiError(err); }
+    }
+
+    await load();
+    return wrap;
+  }
+
+  SR.views = SR.views || {};
+  SR.views.users = { render };
+}(window));
