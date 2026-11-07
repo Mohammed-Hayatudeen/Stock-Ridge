@@ -1,0 +1,1529 @@
+'use strict';
+// =====================================================================
+// server/routes/stock.js — EVERYTHING THAT MOVES STOCK
+// =====================================================================
+// FOUR WAYS STOCK CHANGES, and no others:
+//
+//   RECEIVE   goods in from a supplier (or a production run)
+//   SELL      goods out to a customer        -> server/routes/sales.js
+//   ADJUST    a correction: damage, theft, expiry, a stocktake variance
+//   TRANSFER  the same goods moving between branches or businesses
+//
+// Every one of them writes a batch-level row, posts a general-ledger entry and
+// records an audit entry in the SAME transaction. That is not ceremony: stock is
+// the asset a shop actually holds, and an unexplained movement in it is either
+// shrinkage or a bug. Without the ledger leg, "where did ₦400,000 of cement go?"
+// has no answer; without the audit leg, "who moved it?" has no answer.
+//
+// STOCK IS ONLY EVER IN BASE UNITS. A receiving clerk books 20 cartons; the
+// batch stores 960 pieces. Storing "20 cartons" would make the on-hand figure
+// meaningless the moment somebody sells a single piece.
+// =====================================================================
+
+const { idempotent } = require('../lib/idempotency');
+const { HttpError } = require('../lib/http');
+const { recordFromCtx } = require('../lib/audit');
+const { atLeast } = require('../../domain/roles');
+const { requireScreen } = require('../lib/screenGuard');
+// `valid` was missing from this list while POST /api/stock/adjust called it at
+// the adjustment-type line, so every stock adjustment — the write-off that
+// records a broken TV — answered 500 "valid is not defined".
+const { resolveBranch, resolveBusiness, branchFilter, scopeFilter, pagination, listResponse, requireField, numField, strField, boolField, dateRange, valid, searchTerm } = require('../lib/respond');
+const { toBaseUnits, buildLadder, validateLadder, weightedAverageCost } = require('../../domain/uom');
+const { round2, roundTo } = require('../../domain/money');
+const { newId } = require('../../domain/crypto');
+const { watNow, watToday, addDays, watToUtc } = require('../../domain/time');
+const { canAdjustStock } = require('../../domain/planLimits');
+const { oneOf } = require('../../domain/validation');
+const glService = require('../services/glService');
+const { resolveProfile } = require('../../domain/verticals');
+const { modulesFor } = require('../../domain/modules');
+const { parseSerials, acceptSerials, planSerialRows, serialStatements } = require('../services/serialsService');
+const { planCataloguePrice } = require('../services/cataloguePrice');
+
+const ADJUSTMENT_TYPES = ['DAMAGE', 'THEFT', 'EXPIRED', 'COUNT_VARIANCE', 'SAMPLE', 'SHRINKAGE', 'FOUND', 'RETURN_TO_SUPPLIER', 'WRITE_OFF', 'OTHER'];
+
+function mount(app, base = '/api') {
+  // -------------------------------------------------------------------
+  // STOCK ON HAND
+  // -------------------------------------------------------------------
+  /**
+   * Stock at a branch, grouped by product.
+   *
+   * `on_shelf`, `reserved` and `available` are reported separately and never
+   * collapsed into one number. "We have 10" and "we can sell 10" are different
+   * statements whenever a layaway or an open delivery job is holding units, and a
+   * cashier who is told the first will sell the second.
+   */
+  app.get(`${base}/stock`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const branch = await resolveBranch(db, ctx);
+    const { limit, offset } = pagination(ctx);
+    const search = searchTerm(ctx);
+    const filter = ctx.req.queryParam('filter'); // low | out | expiring | quarantined | overstock
+    const settings = ctx.get('settings');
+
+    const where = ['sb.branch_id = ?', 'sb.is_deleted = 0'];
+    const params = [String(branch.id)];
+    if (filter === 'quarantined') where.push("sb.status = 'QUARANTINED'");
+    else where.push("sb.status NOT IN ('QUARANTINED','EXPIRED')");
+    if (search) { where.push('(p.name LIKE ? OR p.sku LIKE ?)'); params.push(`%${search}%`, `%${search}%`); }
+    const categoryId = String(ctx.req.queryParam('category_id') || '').trim();
+    if (categoryId) {
+      where.push('p.category_id = ?');
+      params.push(categoryId);
+    }
+    const rows = await db.all(`
+      SELECT p.id AS product_id, ? AS branch_id, p.sku, p.name, p.base_unit_name, p.reorder_level, p.selling_price,
+             p.cost_price AS book_cost, p.requires_serial, p.tracks_variants, p.has_expiry,
+             c.name AS category_name, c.code AS category_code, p.nafdac_catalog_id,
+             COALESCE(SUM(sb.quantity), 0) AS on_shelf,
+             COALESCE(SUM(sb.quantity_reserved), 0) AS reserved,
+             COALESCE(SUM(sb.quantity - sb.quantity_reserved), 0) AS available,
+             COALESCE(SUM(sb.quantity * sb.cost_price_per_unit), 0) AS stock_value,
+             COUNT(sb.id) AS batch_count,
+             MIN(sb.expiry_date) AS next_expiry
+      FROM stock_batches sb
+      JOIN products p ON p.id = sb.product_id AND p.is_deleted = 0
+      LEFT JOIN product_categories c ON c.id = p.category_id AND c.business_id = p.business_id
+      WHERE ${where.join(' AND ')}
+      GROUP BY p.id
+      HAVING 1 = 1
+        ${filter === 'low' ? 'AND available <= p.reorder_level AND p.reorder_level > 0' : ''}
+        ${filter === 'out' ? 'AND available <= 0' : ''}
+        ${filter === 'overstock' ? 'AND p.reorder_level > 0 AND available > p.reorder_level * 4' : ''}
+        ${filter === 'expiring' ? `AND next_expiry IS NOT NULL AND next_expiry <= date('now', '+${Number(settings.expiry_alert_days) || 60} days')` : ''}
+      ORDER BY p.name
+      LIMIT ? OFFSET ?`,
+    // `branch_id` leads the projection so each row states WHICH branch the
+    // numbers belong to. The offline client keys its mirror on it, and a stock
+    // screenshot forwarded to a supplier is worthless if nobody can tell which
+    // shop it came from.
+    [String(branch.id), ...params, limit, offset]);
+
+    ctx.json(listResponse(rows.map((r) => ({
+        ...r,
+        on_shelf: round2(Number(r.on_shelf)), reserved: round2(Number(r.reserved)),
+        available: round2(Number(r.available)), stock_value: round2(Number(r.stock_value)),
+        low_stock: Number(r.reorder_level) > 0 && Number(r.available) <= Number(r.reorder_level),
+        out_of_stock: Number(r.available) <= 0,
+        days_to_expiry: r.next_expiry ? Math.max(0, Math.round((Date.parse(r.next_expiry) - Date.parse(watToday())) / 86400000)) : null,
+      })), { limit, offset }));
+  });
+
+  /** Batch-level detail for one product: what is on the shelf, at what cost, expiring when. */
+  app.get(`${base}/stock/:productId/batches`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const branch = await resolveBranch(db, ctx);
+    const productId = String(ctx.req.param('productId'));
+    const product = await db.first('SELECT * FROM products WHERE id = ? AND is_deleted = 0', [productId]);
+    if (!product) throw new HttpError('That product does not exist.', { status: 404, code: 'PRODUCT_NOT_FOUND' });
+
+    const rows = await db.all(`SELECT sb.*, s.name AS supplier_name, v.name AS variant_name,
+          (SELECT COUNT(*) FROM serial_numbers sn WHERE sn.batch_id = sb.id AND sn.is_deleted = 0) AS serial_count
+        FROM stock_batches sb
+        LEFT JOIN suppliers s ON s.id = sb.supplier_id
+        LEFT JOIN product_variants v ON v.id = sb.variant_id
+        WHERE sb.product_id = ? AND sb.branch_id = ? AND sb.is_deleted = 0
+        ORDER BY sb.expiry_date IS NULL, sb.expiry_date, sb.received_at, sb.batch_no, sb.id`,
+    [productId, String(branch.id)]);
+    ctx.json({ ok: true, product, batches: rows });
+  });
+
+  /** Stock valuation across every branch the caller may see. The balance-sheet number. */
+  app.get(`${base}/stock/valuation`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const scope = ctx.get('scope');
+    const where = ['sb.is_deleted = 0']; const params = [];
+    const f = scopeFilter(scope, { alias: 'sb' });
+    if (f.sql) { where.push(f.sql); params.push(...f.params); }
+    // The rows are branches. Their own column is `id`, not `branch_id`. The
+    // batch clause above decides which stock counts. This one decides which
+    // shops appear, so a general manager does not see every other business's
+    // empty shelves.
+    const branchRows = scopeFilter(scope, { alias: 'b', branchColumn: 'id', allowNullBranch: false, ignoreFocus: true });
+
+    // A BRANCH THE CALLER NAMED NARROWS THIS REPORT TO THAT BRANCH — and on THIS
+    // endpoint the filter lands on `b.id`, not on `sb.`, because the rows being
+    // returned ARE branches (the query groups by branch). The scope clause above is
+    // the other half of the same rule: which BATCHES count towards each branch.
+    //
+    // The parameter has to be added exactly where it is referenced. The first version
+    // of this line pushed it into the `where` array, which this query does not use —
+    // and every caller who named a branch got `500 Too many parameter values were
+    // provided` from the engine, caught by the views test the moment it ran. A filter
+    // that is dead code is worse than a missing one: the placeholder count still moves.
+    const named = await branchFilter(db, ctx, {});
+    const asAt = ctx.req.queryParam('as_at');
+
+    const rows = await db.all(`
+      SELECT b.id AS branch_id, b.name AS branch_name, b.code AS branch_code,
+             COALESCE(SUM(sb.quantity), 0) AS units,
+             COALESCE(SUM(sb.quantity * sb.cost_price_per_unit), 0) AS at_cost,
+             COALESCE(SUM(sb.quantity * sb.selling_price_per_unit), 0) AS at_retail,
+             COALESCE(SUM(sb.quantity_reserved), 0) AS reserved
+      FROM branches b
+      LEFT JOIN stock_batches sb ON sb.branch_id = b.id AND sb.is_deleted = 0
+           AND sb.status NOT IN ('QUARANTINED','EXPIRED')
+      WHERE b.is_deleted = 0 AND b.is_active = 1 ${branchRows.sql ? `AND ${branchRows.sql}` : ''} ${f.sql ? `AND ${f.sql}` : ''} ${named.branchId ? 'AND b.id = ?' : ''}
+      GROUP BY b.id ORDER BY b.name`, named.branchId ? [...branchRows.params, ...params, named.branchId] : [...branchRows.params, ...params]);
+
+    const categoryRows = await db.all(`
+      SELECT c.id AS category_id, c.business_id, c.code AS category_code,
+             COALESCE(c.name, 'Uncategorised') AS category_name,
+             COALESCE(SUM(sb.quantity),0) AS units,
+             COALESCE(SUM(sb.quantity * sb.cost_price_per_unit),0) AS at_cost,
+             COALESCE(SUM(sb.quantity * COALESCE(sb.selling_price_per_unit, 0)),0) AS at_retail
+        FROM stock_batches sb
+        JOIN products p ON p.id = sb.product_id
+        LEFT JOIN product_categories c ON c.id = p.category_id
+             AND c.business_id = p.business_id AND c.is_deleted = 0
+       WHERE sb.is_deleted = 0 AND sb.status NOT IN ('QUARANTINED','EXPIRED')
+         ${named.branchId ? 'AND sb.branch_id = ?' : ''} ${f.sql ? `AND ${f.sql}` : ''}
+       GROUP BY c.id, c.business_id
+       ORDER BY at_cost DESC, category_name COLLATE NOCASE`,
+    named.branchId ? [named.branchId, ...params] : params);
+    const byCategory = categoryRows.map((row) => ({
+      category_id: row.category_id,
+      business_id: row.business_id,
+      category_code: row.category_code,
+      name: row.category_name,
+      units: round2(Number(row.units)),
+      at_cost: round2(Number(row.at_cost)),
+      at_retail: round2(Number(row.at_retail)),
+    }));
+
+    const totals = rows.reduce((a, r) => ({
+      units: round2(a.units + Number(r.units)), at_cost: round2(a.at_cost + Number(r.at_cost)),
+      at_retail: round2(a.at_retail + Number(r.at_retail)), reserved: round2(a.reserved + Number(r.reserved)),
+    }), { units: 0, at_cost: 0, at_retail: 0, reserved: 0 });
+
+    ctx.json({
+      ok: true, asAt: asAt || watToday(), branches: rows, totals, byCategory,
+      potentialMargin: round2(totals.at_retail - totals.at_cost),
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // GOODS RECEIVED
+  // -------------------------------------------------------------------
+  /**
+   * Receive stock. Creates a batch, updates the product's weighted-average cost
+   * and posts the purchase to the ledger.
+   *
+   * COST IS STORED AT FULL PRECISION on the batch. Rounding a per-unit cost to
+   * kobo at receipt time loses money on every large batch: ₦0.004 a unit across
+   * 20,000 sachets is ₦80, and it compounds across a year of receipts. The
+   * product's weighted average is rounded for DISPLAY only.
+   */
+  app.post(`${base}/stock/receive`, idempotent(async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    const settings = ctx.get('settings');
+    if (!atLeast(user.role, 'MANAGER')) {
+      throw new HttpError('Only a manager or above can receive stock. A goods receipt changes the cost basis of everything you sell, so it needs a signature behind it.', { status: 403, code: 'ROLE_REQUIRED' });
+    }
+    const body = await ctx.req.json();
+    const branch = await resolveBranch(db, ctx);
+    const business = await resolveBusiness(db, ctx, branch);
+
+    const productId = String(requireField(body, 'product_id', 'Product'));
+    const product = await db.first('SELECT * FROM products WHERE id = ? AND is_deleted = 0', [productId]);
+    if (!product) throw new HttpError('That product does not exist.', { status: 404, code: 'PRODUCT_NOT_FOUND' });
+
+    const units = await db.all('SELECT * FROM product_units WHERE product_id = ? AND is_deleted = 0 ORDER BY quantity_in_base ASC', [productId]);
+    const ladderResult = buildLadder(units);
+    if (!ladderResult.ok) throw new HttpError(ladderResult.error, { status: 400, code: ladderResult.code });
+
+    const unitCode = String(body.unit_code || ladderResult.defaultSell.code).toUpperCase();
+    const qtyIn = numField(requireField(body, 'quantity', 'Quantity'), { field: 'Quantity', min: 0.0001, places: 4 });
+    const conversion = toBaseUnits({ quantity: qtyIn, unitCode, ladder: ladderResult.ladder });
+    if (!conversion.ok) throw new HttpError(conversion.error, { status: 400, code: conversion.code, fields: { quantity: conversion.error } });
+    const quantityBase = conversion.baseQuantity;
+
+    // The batch these units are filed against, generated here because the serial rows
+    // reference it and the hash of each one's first chain link is computed before the
+    // transaction opens.
+    const batchId = newId();
+
+    // ===================================================================
+    // SERIALS ARRIVE WITH THE GOODS, OR THEY NEVER ARRIVE AT ALL
+    // ===================================================================
+    // The rules are in server/services/serialsService.js, because there are two routes that
+    // receive goods and the first version of this capture lived in only one of them.
+    const serialTrackingOn = Boolean(settings) && Number(settings.serial_tracking_enabled) === 1;
+    const accepted = await acceptSerials(db, {
+      product, quantityBase,
+      supplied: parseSerials(body.serials || body.serial_numbers || body.serial_no),
+      featureOn: serialTrackingOn,
+    });
+
+    // Hashes before the write phase: a transaction body may only queue statements, and a
+    // hash is async (domain/crypto uses WebCrypto where it exists).
+    const serialRows = await planSerialRows(db, accepted.serials, {
+      branchId: String(branch.id),
+      batchId,
+      productId,
+      variantId: body.variant_id ? String(body.variant_id) : null,
+      note: `Received ${watNow()} at ${branch.name} on goods receipt ${strField(body.batch_no, { field: 'Batch number', maxLength: 60 }) || batchId.slice(0, 8)}.`,
+      actorId: String(user.id),
+    });
+
+    // Cost is PER THE UNIT BEING RECEIVED, then converted to per-base. A clerk
+    // books "₦480,000 for 20 cartons"; storing that as a per-piece cost would
+    // overstate cost by the carton factor and invert the margin.
+    // `cost_price_per_unit` was the name the receiving FORM sent, and this endpoint
+    // never read it — so "Cost price is required" was the answer to every attempt to
+    // receive stock from the screen. The form now sends `cost_price` like every
+    // other client; both names are accepted so a payload already written elsewhere
+    // does not turn into a lost receipt.
+    const costField = body.cost_price != null ? body.cost_price : body.cost_price_per_unit;
+    const costPerReceivedUnit = numField(requireField({ cost_price: costField }, 'cost_price', 'Cost price'), { field: 'Cost price', min: 0, places: 6 });
+    const costPerBase = round2((costPerReceivedUnit * conversion.factor) / conversion.factor) === costPerReceivedUnit
+      ? costPerReceivedUnit / Number(conversion.factor || 1)
+      : costPerReceivedUnit / Number(conversion.factor || 1);
+    // Same rule as a purchase-order receipt: a selling price already on the
+    // product is what the till quotes and what the customer receipt prints.
+    // A figure typed on this delivery fills an empty catalogue. It does not
+    // replace one.
+    const typedPerBase = body.selling_price != null
+      ? numField(body.selling_price, { field: 'Selling price', min: 0 }) / Number(conversion.factor || 1)
+      : 0;
+    const cataloguePerBase = Number(product.selling_price) > 0 ? Number(product.selling_price) : 0;
+    const sellingPerBase = cataloguePerBase > 0
+      ? cataloguePerBase
+      : (typedPerBase > 0 ? typedPerBase : round2(costPerBase * 1.3));
+
+    const supplierId = body.supplier_id ? String(body.supplier_id) : null;
+    if (supplierId) {
+      const supplier = await db.first('SELECT id FROM suppliers WHERE id = ? AND is_deleted = 0', [supplierId]);
+      if (!supplier) throw new HttpError('That supplier does not exist.', { status: 404, code: 'SUPPLIER_NOT_FOUND' });
+    }
+
+    // Freight is entered per RECEIVED unit on the form and converted below, because
+    // "₦30,000 clearing on twenty cartons" is how the cost actually arrives.
+    const freight = numField(body.freight_cost != null ? body.freight_cost : body.freight_per_unit,
+      { field: 'Freight', min: 0 });
+    const paidNow = numField(body.paid_now, { field: 'Amount paid', min: 0 });
+    const onCredit = numField(body.on_credit, { field: 'Amount on credit', min: 0 });
+    const expiryDate = body.expiry_date ? strField(body.expiry_date, { field: 'Expiry date', maxLength: 10 }) : null;
+    if (expiryDate && !/^\d{4}-\d{2}-\d{2}$/.test(expiryDate)) {
+      throw new HttpError('The expiry date must be YYYY-MM-DD.', { status: 400, code: 'INVALID_DATE', fields: { expiry_date: 'YYYY-MM-DD' } });
+    }
+    if (expiryDate && expiryDate <= watToday()) {
+      // Receiving already-expired stock is either a data-entry mistake or a
+      // decision somebody should make deliberately, not by accident.
+      throw new HttpError(`That expiry date (${expiryDate}) is today or already past. If the stock is genuinely expired, receive it and quarantine it so the decision is on the record.`, { status: 400, code: 'EXPIRED_ON_RECEIPT' });
+    }
+
+    const receivedAt = body.received_at ? String(body.received_at) : watToUtc(watNow());
+    const accountIds = await glService.loadAccountCodes(db, business.id);
+
+    // ---- EVERY READ HAPPENS HERE, before the transaction.
+    // The write phase may only queue statements: better-sqlite3 is fully
+    // synchronous and cannot span a microtask, and Turso HTTP has no interactive
+    // transaction at all, so an `await db.first()` inside the transaction either
+    // deadlocks or silently never runs.
+    const heldBatches = await db.all('SELECT quantity, cost_price_per_unit FROM stock_batches WHERE product_id = ? AND branch_id = ? AND is_deleted = 0 AND id <> ?',
+      [productId, String(branch.id), batchId]);
+    const supplier = supplierId ? await db.first('SELECT * FROM suppliers WHERE id = ?', [supplierId]) : null;
+
+    // Freight and clearing are CAPITALISED into the batch cost rather than
+    // expensed. They are part of what it cost to get the goods to the shelf, and
+    // expensing them overstates this month's costs while understating the margin
+    // on the goods they were spent on.
+    const freightPerBase = quantityBase > 0 ? freight / quantityBase : 0;
+    const landedCostPerBase = round2((costPerBase + freightPerBase) * 1000000) / 1000000;
+
+    // Weighted-average cost across everything already on hand plus this receipt.
+    const newAvgCost = weightedAverageCost([
+      ...heldBatches.map((h) => ({ quantity: Number(h.quantity), cost: Number(h.cost_price_per_unit) })),
+      { quantity: quantityBase, cost: landedCostPerBase },
+    ]);
+
+    // Per base unit, the same figure the batch stores and the till multiplies
+    // by the sell-unit factor. Read before the transaction: the write phase
+    // may only queue.
+    const priceWrite = await planCataloguePrice(db, {
+      product, branchId: branch.id, businessId: business.id,
+      sellingPrice: round2(sellingPerBase), userId: user.id,
+    });
+
+    await db.transaction(async (tx) => {
+      tx.queue(`INSERT INTO stock_batches (
+          id, branch_id, business_id, product_id, variant_id, batch_no, supplier_id, purchase_order_id,
+          cost_price_per_unit, selling_price_per_unit, quantity, quantity_reserved, initial_quantity,
+          manufacture_date, expiry_date, received_at, received_by, status, warehouse_zone, notes,
+          created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?, 'ACTIVE',?,?, datetime('now'), datetime('now'))`, [
+        batchId, String(branch.id), String(business.id), productId,
+        body.variant_id ? String(body.variant_id) : null,
+        strField(body.batch_no, { field: 'Batch number', maxLength: 60 }) || `GRN-${Date.now().toString(36).toUpperCase()}`,
+        supplierId, body.purchase_order_id ? String(body.purchase_order_id) : null,
+        landedCostPerBase, round2(sellingPerBase), quantityBase, quantityBase,
+        strField(body.manufacture_date, { field: 'Manufacture date', maxLength: 10 }),
+        expiryDate, receivedAt, String(user.id),
+        strField(body.warehouse_zone, { field: 'Warehouse zone', maxLength: 120 }),
+        strField(body.notes, { field: 'Notes', maxLength: 500 }),
+      ]);
+
+      // The weighted average was computed BEFORE the transaction from the batches
+      // already on hand. It is what `products.cost_price` means, and maintaining
+      // it here rather than in a nightly job keeps the margin on the next sale
+      // correct immediately.
+      // A shared market row is not this shop's catalogue. Writing the cost
+      // there would show every other business what this delivery cost.
+      if (newAvgCost != null && product.business_id && String(product.business_id) === String(business.id)) {
+        tx.queue("UPDATE products SET cost_price = ?, updated_at = datetime('now') WHERE id = ? AND business_id = ?", [round2(newAvgCost), productId, String(business.id)]);
+      }
+      for (const st of priceWrite.statements) tx.queue(st.sql, st.params);
+
+      // Quarantine on arrival when asked: a failed goods-received inspection must
+      // not reach the shelf, but it must still be counted.
+      if (boolField(body.quarantine)) {
+        tx.queue("UPDATE stock_batches SET status = 'QUARANTINED', updated_at = datetime('now') WHERE id = ?", [batchId]);
+      }
+
+      // ---- the serials, and the first link of each one's story
+      serialStatements(tx, serialRows);
+
+      const grossValue = round2(quantityBase * landedCostPerBase);
+      for (const st of glService.postPurchaseReceiptStatements({
+        businessId: business.id, branchId: branch.id, poId: body.purchase_order_id || batchId,
+        items: [{ quantity_received: quantityBase, cost_per_unit: landedCostPerBase }],
+        supplier, paidNow, onCredit: onCredit || Math.max(0, grossValue - paidNow),
+        freightTotal: freight, user, accountIds,
+      })) tx.queue(st.sql, st.params);
+    });
+
+    await recordFromCtx(ctx, {
+      action: 'PO_RECEIVED', entityType: 'STOCK_BATCH', entityId: batchId, branchId: branch.id, businessId: business.id,
+      after: { product: product.name, quantityBase, unitCode, costPerBase: landedCostPerBase, freight, expiryDate },
+    });
+
+    ctx.json({
+      ok: true, batchId,
+      message: `Received ${qtyIn} ${unitCode.toLowerCase()} of ${product.name} (${round2(quantityBase)} ${product.base_unit_name}) at ₦${landedCostPerBase.toLocaleString('en-NG', { maximumFractionDigits: 4 })} each.`
+        + (serialRows.length ? ` ${serialRows.length} serial number(s) filed against this receipt, so each unit can be sold and its warranty proved.` : ''),
+      quantityBase, landedCostPerBase,
+      prices: priceWrite.receipt ? [priceWrite.receipt] : [],
+      serialCount: serialRows.length,
+      serials: serialRows.map((s) => s.serialNo),
+      warnings: [
+        freight > 0 && quantityBase === 0 ? 'Freight was charged but no quantity was received, so it could not be allocated.' : null,
+        Number(product.requires_serial) === 1 && !serialTrackingOn ? `Serial numbers were not asked for: serial capture is switched off in Settings for this deployment. ${product.name} expects them, so its warranty cannot be proved from the serial until it is switched back on.` : null,
+        ...accepted.warnings,
+      ].filter(Boolean),
+    }, 201);
+  }));
+
+  // -------------------------------------------------------------------
+  // ADJUSTMENTS
+  // -------------------------------------------------------------------
+  /**
+   * Adjust stock: damage, theft, expiry, a found item, a return to supplier.
+   *
+   * THE GUARDRAILS ARE THE FEATURE. A cashier who can write off unlimited stock
+   * has found the second classic retail theft pattern (take the goods, record
+   * them as damaged). But a flat ban is wrong too — a broken bottle at a busy
+   * counter has to be dealt with by the person holding it. So STAFF get an
+   * OWNER-set allowance in units and in value; above it, a manager must act.
+   */
+  app.post(`${base}/stock/adjust`, idempotent(async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    const settings = ctx.get('settings');
+    const body = await ctx.req.json();
+    const branch = await resolveBranch(db, ctx);
+    const business = await resolveBusiness(db, ctx, branch);
+
+    const adjustmentType = valid(oneOf(requireField(body, 'adjustment_type', 'Adjustment type'), ADJUSTMENT_TYPES, { field: 'Adjustment type' }), 'adjustment_type');
+    const productId = String(requireField(body, 'product_id', 'Product'));
+    const batchId = body.batch_id ? String(body.batch_id) : null;
+    const reason = strField(body.reason, { field: 'Reason', maxLength: 500, required: true });
+    if (reason.length < 4) {
+      throw new HttpError('Give a real reason. “Damage” alone cannot be reviewed three months later when the write-offs are being questioned.', { status: 400, code: 'REASON_REQUIRED', fields: { reason: 'At least four characters.' } });
+    }
+
+    const product = await db.first('SELECT * FROM products WHERE id = ? AND is_deleted = 0', [productId]);
+    if (!product) throw new HttpError('That product does not exist.', { status: 404, code: 'PRODUCT_NOT_FOUND' });
+
+    // Resolve the batch: named, else the oldest with stock (FIFO), because a
+    // write-off that lands on an arbitrary batch corrupts that batch's cost.
+    let batch = null;
+    if (batchId) {
+      batch = await db.first('SELECT * FROM stock_batches WHERE id = ? AND product_id = ? AND branch_id = ? AND is_deleted = 0', [batchId, productId, String(branch.id)]);
+      if (!batch) throw new HttpError('That batch does not exist at this branch.', { status: 404, code: 'BATCH_NOT_FOUND' });
+    }
+
+    const units = await db.all('SELECT * FROM product_units WHERE product_id = ? AND is_deleted = 0 ORDER BY quantity_in_base ASC', [productId]);
+    const ladderResult = buildLadder(units);
+    const unitCode = String(body.unit_code || (ladderResult.ok ? ladderResult.base.code : 'PIECE')).toUpperCase();
+    const signedQtyIn = numField(requireField(body, 'quantity', 'Quantity'), { field: 'Quantity', min: -1000000, max: 1000000, places: 4 });
+    const conversion = toBaseUnits({ quantity: Math.abs(signedQtyIn), unitCode, ladder: ladderResult.ok ? ladderResult.ladder : [] });
+    if (!conversion.ok) throw new HttpError(conversion.error, { status: 400, code: conversion.code });
+
+    // Sign convention: FOUND adds, everything else removes. Accepting a sign from
+    // the client would let a "damage" adjustment quietly add stock instead.
+    const adds = adjustmentType === 'FOUND';
+    const quantityBase = adds ? Math.abs(conversion.baseQuantity) : -Math.abs(conversion.baseQuantity);
+
+    if (!batch && !adds) {
+      batch = await db.first(`SELECT * FROM stock_batches WHERE product_id = ? AND branch_id = ? AND is_deleted = 0
+          AND status = 'ACTIVE' AND quantity - quantity_reserved >= ?
+        ORDER BY expiry_date IS NULL, expiry_date, received_at, batch_no, id LIMIT 1`,
+      [productId, String(branch.id), Math.abs(quantityBase)]);
+      if (!batch) throw new HttpError(`There is not enough unreserved stock of ${product.name} at ${branch.name} to write off ${Math.abs(conversion.baseQuantity)} ${product.base_unit_name}.`, { status: 409, code: 'INSUFFICIENT_STOCK' });
+    }
+
+    const unitCost = batch ? Number(batch.cost_price_per_unit) : Number(product.cost_price) || 0;
+    const totalValue = round2(Math.abs(quantityBase) * unitCost);
+
+    // ---- authority check, BEFORE any write
+    const authority = canAdjustStock(settings, user, { quantityBase: Math.abs(quantityBase), value: totalValue });
+    if (!authority.allowed) {
+      throw new HttpError(
+        `${authority.reason} Ask a manager to make this adjustment — the limit exists so that a write-off above it is a second person's decision.`,
+        { status: 403, code: 'ADJUSTMENT_NOT_ALLOWED' },
+      );
+    }
+
+    const id = newId();
+    const accountIds = await glService.loadAccountCodes(db, business.id);
+
+    await db.transaction(async (tx) => {
+      if (!adds) {
+        // Guarded: if a sale took this stock between the read and the write, the
+        // update affects no rows and the commit fails rather than driving the
+        // quantity negative.
+        tx.queue(`UPDATE stock_batches SET quantity = quantity - ?, updated_at = datetime('now')
+            WHERE id = ? AND is_deleted = 0 AND quantity - quantity_reserved >= ?`,
+        [Math.abs(quantityBase), String(batch.id), Math.abs(quantityBase)]);
+        tx.queue("UPDATE stock_batches SET status = CASE WHEN quantity <= 0 THEN 'DEPLETED' ELSE status END, updated_at = datetime('now') WHERE id = ?", [String(batch.id)]);
+      } else {
+        if (batch) {
+          tx.queue("UPDATE stock_batches SET quantity = quantity + ?, initial_quantity = initial_quantity + ?, status = CASE WHEN status = 'DEPLETED' THEN 'ACTIVE' ELSE status END, updated_at = datetime('now') WHERE id = ?",
+            [Math.abs(quantityBase), Math.abs(quantityBase), String(batch.id)]);
+        } else {
+          // Found stock with no batch to return to gets its own, at the book
+          // cost. Without a batch it would be sellable by count but invisible to
+          // FIFO, expiry tracking and quarantine.
+          tx.queue(`INSERT INTO stock_batches (
+              id, branch_id, business_id, product_id, batch_no, cost_price_per_unit, selling_price_per_unit,
+              quantity, quantity_reserved, initial_quantity, received_at, received_by, status, warehouse_zone, notes,
+              created_at, updated_at)
+            VALUES (?,?,?,?, 'FOUND', ?, ?, ?, 0, ?, ?, ?, 'ACTIVE', 'Recovered', 'Stock found during a count', datetime('now'), datetime('now'))`, [
+            newId(), String(branch.id), String(business.id), productId,
+            unitCost, Number(product.selling_price) || 0, Math.abs(quantityBase), Math.abs(quantityBase),
+            watToUtc(watNow()), String(user.id),
+          ]);
+        }
+      }
+
+      tx.queue(`INSERT INTO stock_adjustments (
+          id, branch_id, business_id, batch_id, product_id, variant_id, adjustment_type,
+          quantity, unit_cost, total_value, reason, requires_approval, created_by, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?, datetime('now'), datetime('now'))`, [
+        id, String(branch.id), String(business.id), batch ? String(batch.id) : null, productId,
+        body.variant_id ? String(body.variant_id) : (batch ? batch.variant_id : null),
+        adjustmentType, quantityBase, unitCost, adds ? totalValue : -totalValue, reason, String(user.id),
+      ]);
+
+      for (const st of glService.postAdjustmentStatements({
+        adjustment: { id, adjustment_type: adjustmentType, quantity: quantityBase, total_value: adds ? totalValue : -totalValue, reason },
+        business: { id: business.id }, branch: { id: branch.id }, accountIds, user,
+      })) tx.queue(st.sql, st.params);
+    });
+
+    await recordFromCtx(ctx, {
+      action: 'STOCK_ADJUSTED', entityType: 'STOCK_ADJUSTMENT', entityId: id, branchId: branch.id, businessId: business.id,
+      after: { product: product.name, type: adjustmentType, quantityBase, value: totalValue, reason },
+    });
+
+    ctx.json({
+      ok: true, id,
+      message: `${adds ? 'Added' : 'Wrote off'} ${Math.abs(round2(quantityBase))} ${product.base_unit_name} of ${product.name} as ${adjustmentType.replace(/_/g, ' ').toLowerCase()} (₦${totalValue.toLocaleString('en-NG')}).`,
+      quantityBase, totalValue,
+    }, 201);
+  }));
+
+  app.get(`${base}/adjustments`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const scope = ctx.get('scope');
+    const { limit, offset } = pagination(ctx);
+    const { from, to } = dateRange(ctx, { defaultDays: 30 });
+    const where = ['a.is_deleted = 0', "date(a.created_at, '+1 hours') BETWEEN ? AND ?"];
+    const params = [from, to];
+    const f = scopeFilter(scope, { alias: 'a' });
+    if (f.sql) { where.push(f.sql); params.push(...f.params); }
+
+    // A BRANCH THE CALLER NAMED NARROWS THIS LIST — see branchFilter() in lib/respond.
+    const bf = await branchFilter(db, ctx, { alias: 'a' });
+    if (bf.sql) { where.push(bf.sql); params.push(...bf.params); }
+    const type = ctx.req.queryParam('type');
+    if (type) { where.push('a.adjustment_type = ?'); params.push(String(type).toUpperCase()); }
+
+    const rows = await db.all(`SELECT a.*, p.name AS product_name, p.sku, p.base_unit_name, b.name AS branch_name,
+          u.full_name AS created_by_name
+        FROM stock_adjustments a
+        JOIN products p ON p.id = a.product_id
+        LEFT JOIN branches b ON b.id = a.branch_id
+        LEFT JOIN users u ON u.id = a.created_by
+        WHERE ${where.join(' AND ')}
+        ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const total = await db.scalar(`SELECT COUNT(*) FROM stock_adjustments a WHERE ${where.join(' AND ')}`, params);
+    const byType = await db.all(`SELECT a.adjustment_type, COUNT(*) AS entries, SUM(ABS(a.total_value)) AS value
+        FROM stock_adjustments a WHERE ${where.join(' AND ')} GROUP BY a.adjustment_type ORDER BY value DESC`, params);
+    ctx.json({ ...listResponse(rows, { limit, offset }, total), byType });
+  });
+
+  // -------------------------------------------------------------------
+  // QUARANTINE
+  // -------------------------------------------------------------------
+  /**
+   * Quarantine or release a batch.
+   *
+   * Quarantined stock is COUNTED but NOT SELLABLE. That distinction is the whole
+   * point: a failed inspection, a recall, or a customer return that has not been
+   * checked yet must stay visible in the stock value while being impossible to
+   * ring up.
+   */
+  app.post(`${base}/stock/batches/:id/quarantine`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager or above can quarantine stock.', { status: 403, code: 'ROLE_REQUIRED' });
+    const body = await ctx.req.json();
+    const id = String(ctx.req.param('id'));
+    const batch = await db.first('SELECT * FROM stock_batches WHERE id = ? AND is_deleted = 0', [id]);
+    if (!batch) throw new HttpError('That batch does not exist.', { status: 404, code: 'BATCH_NOT_FOUND' });
+    // Row-scoped: the batch names the branch — see resolveBranch's fallback note.
+    const branch = await resolveBranch(db, ctx, { fallback: batch.branch_id });
+    if (String(batch.branch_id) !== String(branch.id)) throw new HttpError('That batch is at another branch.', { status: 403, code: 'BRANCH_SCOPE_VIOLATION' });
+
+    const quarantine = body.release ? false : true;
+    const reason = strField(body.reason, { field: 'Reason', maxLength: 500, required: quarantine });
+    const nextStatus = quarantine ? 'QUARANTINED' : 'ACTIVE';
+
+    await db.run(`UPDATE stock_batches SET status = ?, notes = COALESCE(notes,'') || ?, updated_at = datetime('now') WHERE id = ?`,
+      [nextStatus, quarantine ? ` | Quarantined ${watNow()}: ${reason}` : ` | Released from quarantine ${watNow()}`, id]);
+    await recordFromCtx(ctx, {
+      action: 'BATCH_QUARANTINED', entityType: 'STOCK_BATCH', entityId: id, branchId: branch.id,
+      before: { status: batch.status }, after: { status: nextStatus, reason },
+    });
+    ctx.json({ ok: true, message: quarantine ? `Batch ${batch.batch_no || id.slice(0, 8)} quarantined — it is counted but cannot be sold.` : `Batch ${batch.batch_no || id.slice(0, 8)} released back to sellable stock.` });
+  });
+
+  function recallsOn(business) {
+    let overrides = null;
+    if (business && business.profile_overrides_json) {
+      try { overrides = JSON.parse(business.profile_overrides_json); } catch (e) { overrides = null; }
+    }
+    return Boolean(modulesFor(resolveProfile(business && business.profile_code, overrides)).recalls);
+  }
+
+  function recallBatches(rows, batchNos) {
+    const named = String(batchNos || '').trim();
+    if (!named || named === '*') return rows;
+    const wanted = new Set(named.split(/[,;\s]+/).map((part) => part.trim().toUpperCase()).filter(Boolean));
+    return rows.filter((row) => wanted.has(String(row.batch_no || '').toUpperCase()));
+  }
+
+  app.get(`${base}/recalls`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const business = await resolveBusiness(db, ctx);
+    if (!recallsOn(business)) throw new HttpError('This business does not pull products. A pharmacy, a supermarket or a yard that has to stop a batch does.', { status: 403, code: 'MODULE_OFF' });
+    const rows = await db.all(
+      `SELECT r.*, p.name AS product_name, p.sku
+         FROM product_recalls r
+         JOIN products p ON p.id = r.product_id
+        WHERE r.business_id = ? AND r.is_deleted = 0
+        ORDER BY r.opened_at DESC LIMIT 100`,
+      [String(business.id)],
+    );
+    ctx.json({ ok: true, data: rows });
+  });
+
+  app.post(`${base}/recalls`, idempotent(async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('A manager opens a recall. It pulls stock off the shelf.', { status: 403, code: 'ROLE_REQUIRED' });
+    const business = await resolveBusiness(db, ctx);
+    if (!recallsOn(business)) throw new HttpError('This business does not pull products.', { status: 403, code: 'MODULE_OFF' });
+    const body = await ctx.req.json();
+    const productId = String(requireField(body, 'product_id', 'Product'));
+    const product = await db.first('SELECT * FROM products WHERE id = ? AND is_deleted = 0', [productId]);
+    if (!product || String(product.business_id) !== String(business.id)) {
+      throw new HttpError('That product is not on this business.', { status: 404, code: 'PRODUCT_NOT_FOUND' });
+    }
+    const title = strField(body.title, { field: 'Title', maxLength: 160, required: true });
+    const reason = strField(body.reason, { field: 'Reason', maxLength: 1000, required: true });
+    if (!title || title.length < 4 || !reason || reason.length < 8) {
+      throw new HttpError('Say what is being pulled, and why. A title and a reason are what the next person acts on.', { status: 400, code: 'REASON_REQUIRED' });
+    }
+    const recallType = valid(oneOf(body.recall_type || 'QUALITY', ['SAFETY', 'QUALITY', 'REGULATORY', 'VOLUNTARY'], { field: 'Recall type' }), 'recall_type');
+    const batchNos = strField(body.batch_nos || body.batchNos, { field: 'Batch numbers', maxLength: 500 }) || '*';
+    const quarantine = body.quarantine_stock == null ? true : boolField(body.quarantine_stock);
+    const id = newId();
+    const batches = quarantine
+      ? recallBatches(await db.all(
+        `SELECT * FROM stock_batches WHERE product_id = ? AND business_id = ? AND is_deleted = 0 AND status = 'ACTIVE' AND quantity > 0`,
+        [productId, String(business.id)],
+      ), batchNos)
+      : [];
+    const units = round2(batches.reduce((sum, row) => sum + Number(row.quantity || 0), 0));
+    await db.transaction(async (tx) => {
+      tx.queue(`INSERT INTO product_recalls (
+          id, business_id, product_id, title, reason, recall_type, authority_ref, batch_nos,
+          status, units_affected, quarantine_stock, opened_by, opened_at, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?, 'OPEN', ?, ?, ?, datetime('now'), datetime('now'), datetime('now'))`, [
+        id, String(business.id), productId, title, reason, recallType,
+        strField(body.authority_ref, { field: 'Authority reference', maxLength: 80 }),
+        batchNos, units, quarantine ? 1 : 0, String(user.id),
+      ]);
+      for (const batch of batches) {
+        tx.queue(`UPDATE stock_batches SET status = 'QUARANTINED', notes = COALESCE(notes,'') || ?, updated_at = datetime('now') WHERE id = ? AND status = 'ACTIVE'`, [
+          ` | Recall ${id}: ${title}`, String(batch.id),
+        ]);
+      }
+    });
+    await recordFromCtx(ctx, {
+      action: 'RECALL_OPENED', entityType: 'PRODUCT_RECALL', entityId: id, businessId: business.id,
+      after: { title, product: product.name, units, batches: batches.length, quarantine },
+    });
+    ctx.json({
+      ok: true, id,
+      message: quarantine
+        ? `${product.name} is under recall. ${batches.length} batch(es), ${units.toLocaleString('en-NG')} ${product.base_unit_name || 'units'}, are held and cannot be sold. The stock is still on the books until you close the recall and write off what did not come back.`
+        : `${product.name} is under recall. Stock was not held. Say so only if the affected goods are already off the shelf.`,
+    }, 201);
+  }));
+
+  app.post(`${base}/recalls/:id/close`, idempotent(async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('A manager closes a recall.', { status: 403, code: 'ROLE_REQUIRED' });
+    const business = await resolveBusiness(db, ctx);
+    if (!recallsOn(business)) throw new HttpError('This business does not pull products.', { status: 403, code: 'MODULE_OFF' });
+    const id = String(ctx.req.param('id'));
+    const recall = await db.first('SELECT * FROM product_recalls WHERE id = ? AND business_id = ? AND is_deleted = 0', [id, String(business.id)]);
+    if (!recall) throw new HttpError('That recall does not exist.', { status: 404, code: 'RECALL_NOT_FOUND' });
+    if (recall.status === 'CLOSED') throw new HttpError('That recall is already closed.', { status: 409, code: 'ALREADY_CLOSED' });
+    const body = await ctx.req.json().catch(() => ({}));
+    const recovered = numField(body.units_recovered != null ? body.units_recovered : 0, { field: 'Units recovered', min: 0, places: 4 });
+    const writeOff = body.write_off == null ? true : boolField(body.write_off);
+    const held = await db.all(
+      `SELECT * FROM stock_batches WHERE product_id = ? AND business_id = ? AND is_deleted = 0 AND status = 'QUARANTINED' AND quantity > quantity_reserved AND notes LIKE ?`,
+      [String(recall.product_id), String(business.id), `%Recall ${id}%`],
+    );
+    const accountIds = writeOff && held.length ? await glService.loadAccountCodes(db, business.id) : null;
+    let written = 0;
+    let value = 0;
+    await db.transaction(async (tx) => {
+      if (writeOff) {
+        for (const batch of held) {
+          const qty = round2(Number(batch.quantity) - Number(batch.quantity_reserved || 0));
+          if (!(qty > 0)) continue;
+          const unitCost = Number(batch.cost_price_per_unit) || 0;
+          const totalValue = round2(qty * unitCost);
+          const adjustmentId = newId();
+          written = round2(written + qty);
+          value = round2(value + totalValue);
+          tx.queue(`UPDATE stock_batches SET quantity = quantity - ?, status = CASE WHEN quantity - ? <= 0 THEN 'DEPLETED' ELSE status END, updated_at = datetime('now')
+              WHERE id = ? AND quantity - quantity_reserved >= ?`, [qty, qty, String(batch.id), qty]);
+          tx.queue(`INSERT INTO stock_adjustments (
+              id, branch_id, business_id, batch_id, product_id, variant_id, adjustment_type,
+              quantity, unit_cost, total_value, reason, requires_approval, created_by, created_at, updated_at)
+            VALUES (?,?,?,?,?,?, 'WRITE_OFF', ?, ?, ?, ?, 0, ?, datetime('now'), datetime('now'))`, [
+            adjustmentId, String(batch.branch_id), String(business.id), String(batch.id), String(recall.product_id),
+            batch.variant_id || null, -qty, unitCost, -totalValue,
+            `Recall ${recall.title}. Stock that did not come back.`, String(user.id),
+          ]);
+          for (const statement of glService.postAdjustmentStatements({
+            adjustment: { id: adjustmentId, adjustment_type: 'WRITE_OFF', quantity: -qty, total_value: -totalValue, reason: recall.title },
+            business: { id: business.id }, branch: { id: batch.branch_id }, accountIds, user,
+          })) tx.queue(statement.sql, statement.params);
+        }
+      }
+      tx.queue(`UPDATE product_recalls SET status = 'CLOSED', units_recovered = ?, closed_at = datetime('now'),
+          notes = COALESCE(notes,'') || ?, updated_at = datetime('now') WHERE id = ?`, [
+        recovered,
+        `\\nClosed ${watNow()} by ${user.full_name || user.username}. Recovered ${recovered}. Written off ${written}.`,
+        id,
+      ]);
+    });
+    await recordFromCtx(ctx, {
+      action: 'RECALL_CLOSED', entityType: 'PRODUCT_RECALL', entityId: id, businessId: business.id,
+      before: { status: recall.status }, after: { recovered, written, value, writeOff },
+    });
+    ctx.json({
+      ok: true,
+      message: writeOff
+        ? `Recall closed. ${written.toLocaleString('en-NG')} still on the shelf was written off, ₦${value.toLocaleString('en-NG')} off the stock asset. ${recovered.toLocaleString('en-NG')} came back from customers and is recorded on the recall, not as a second sale.`
+        : `Recall closed. The held stock was left where it is. Release a batch from quarantine if it can be sold again.`,
+    });
+  }));
+
+  // -------------------------------------------------------------------
+  // TRANSFERS
+  // -------------------------------------------------------------------
+  // THE STATUS VOCABULARY OF A STOCK TRANSFER, taken from the table's own CHECK constraint in
+  // `schema/migrations/0001_schema.sql`:
+  //
+  //     status TEXT NOT NULL CHECK (status IN ('INITIATED','IN_TRANSIT','PARTIALLY_RECEIVED',
+  //                                             'RECEIVED','CANCELLED'))
+  //
+  // It is declared here ONCE and answered to the client in the list envelope, because the screen
+  // and the server disagreeing about these five words is not a cosmetic problem: the screen
+  // compared every transfer against `'SENT'`, a status nothing has ever written, so its
+  // "waiting to be booked in" card was always empty, its status filter offered a status that
+  // cannot exist, and the Book-in button was hidden from every receiving branch in the product.
+  // That is the bug this constant exists to make impossible — the client's only copy of the
+  // vocabulary is the one the server sends it.
+  const TRANSFER_STATUSES = ['INITIATED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'];
+  /** Statuses a branch may still book in: sent, or part of it already booked. */
+  const TRANSFER_RECEIVABLE = ['IN_TRANSIT', 'PARTIALLY_RECEIVED'];
+
+  app.get(`${base}/transfers`, async (ctx) => {
+    requireScreen(ctx, 'transfers');
+    const db = ctx.env.DB || ctx.env.db;
+    const scope = ctx.get('scope');
+    const { limit, offset } = pagination(ctx);
+    const status = ctx.req.queryParam('status');
+    const where = ['t.is_deleted = 0']; const params = [];
+    // A transfer is visible to EITHER end: the branch that sent it and the
+    // branch that is waiting for it both need to see it. Scoping only to the
+    // user's own branch would hide incoming stock from the receiver.
+    if (!scope.allBranches && scope.branchIds) {
+      const ids = [...scope.branchIds];
+      where.push(`(t.from_branch_id IN (${ids.map(() => '?').join(',')}) OR t.to_branch_id IN (${ids.map(() => '?').join(',')}))`);
+      params.push(...ids, ...ids);
+    }
+    // A NAMED BRANCH NARROWS A TRANSFER LIST THE SAME WAY — either end counts as
+    // "this branch's transfer", which is the same rule the scope clause above uses.
+    const nbf = await branchFilter(db, ctx, { alias: 't', column: 'from_branch_id', also: ['to_branch_id'], nullMeansEveryBranch: false });
+    if (nbf.sql) { where.push(nbf.sql); params.push(...nbf.params); }
+    // A transfer is visible to either end. Working in one business keeps a
+    // transfer that touches that business, and hides one that touches neither.
+    if (scope.focusBusinessId) {
+      where.push('(t.from_business_id = ? OR t.to_business_id = ?)');
+      params.push(String(scope.focusBusinessId), String(scope.focusBusinessId));
+    }
+    // AN UNKNOWN STATUS IS REFUSED, NOT ANSWERED WITH AN EMPTY LIST. A filter that silently
+    // matches nothing reads as "there are none", which is the opposite of "you asked for
+    // something that does not exist" — and that is how a screen ends up telling a shop it has
+    // no transfers in transit when it has eleven.
+    if (status) {
+      const asked = String(status).toUpperCase();
+      if (!TRANSFER_STATUSES.includes(asked)) {
+        throw new HttpError(`“${status}” is not a transfer status. This system has: ${TRANSFER_STATUSES.join(', ')}.`, { status: 400, code: 'UNKNOWN_STATUS', fields: { status: `One of ${TRANSFER_STATUSES.join(', ')}.` } });
+      }
+      where.push('t.status = ?'); params.push(asked);
+    }
+    const rows = await db.all(`SELECT t.*, fb.name AS from_branch_name, tb.name AS to_branch_name,
+          fbm.name AS from_business_name, tbm.name AS to_business_name,
+          u.full_name AS initiated_by_name,
+          (SELECT COUNT(*) FROM stock_transfer_items i WHERE i.transfer_id = t.id AND i.is_deleted = 0) AS item_count,
+          -- HOW MUCH IS STILL COMING. The receiving branch books in part of a delivery and needs
+          -- to see what is left without opening every transfer one at a time; these two are the
+          -- same figures the detail screen shows, computed the same way.
+          (SELECT COALESCE(SUM(i.quantity_sent_base),0) FROM stock_transfer_items i WHERE i.transfer_id = t.id AND i.is_deleted = 0) AS units_sent,
+          (SELECT COALESCE(SUM(i.quantity_received),0) FROM stock_transfer_items i WHERE i.transfer_id = t.id AND i.is_deleted = 0) AS units_received
+        FROM stock_transfers t
+        JOIN branches fb ON fb.id = t.from_branch_id
+        JOIN branches tb ON tb.id = t.to_branch_id
+        LEFT JOIN businesses fbm ON fbm.id = t.from_business_id
+        LEFT JOIN businesses tbm ON tbm.id = t.to_business_id
+        LEFT JOIN users u ON u.id = t.initiated_by
+        WHERE ${where.join(' AND ')} ORDER BY t.initiated_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    ctx.json({ ...listResponse(rows, { limit, offset }), statuses: TRANSFER_STATUSES, receivable: TRANSFER_RECEIVABLE });
+  });
+
+  /**
+   * One transfer, with its lines.
+   *
+   * The list screen and the detail screen must agree: the receiving branch keys a
+   * partial receipt by the ITEM ID, and those ids only exist in the database. A
+   * client that tried to derive them from the list would post a receipt against
+   * nothing — which is why this route exists rather than the view reusing the
+   * list payload.
+   */
+  app.get(`${base}/transfers/:id`, async (ctx) => {
+    requireScreen(ctx, 'transfers');
+    const db = ctx.env.DB || ctx.env.db;
+    const scope = ctx.get('scope');
+    const id = String(ctx.req.param('id'));
+    const transfer = await db.first(`SELECT t.*, fb.name AS from_branch_name, tb.name AS to_branch_name,
+          fbm.name AS from_business_name, tbm.name AS to_business_name,
+          u.full_name AS initiated_by_name, ru.full_name AS received_by_name
+        FROM stock_transfers t
+        LEFT JOIN branches fb ON fb.id = t.from_branch_id
+        LEFT JOIN branches tb ON tb.id = t.to_branch_id
+        LEFT JOIN businesses fbm ON fbm.id = t.from_business_id
+        LEFT JOIN businesses tbm ON tbm.id = t.to_business_id
+        LEFT JOIN users u ON u.id = t.initiated_by
+        LEFT JOIN users ru ON ru.id = t.received_by
+        WHERE t.id = ? AND t.is_deleted = 0`, [id]);
+    if (!transfer) throw new HttpError('That transfer does not exist.', { status: 404, code: 'TRANSFER_NOT_FOUND' });
+
+    // A transfer is visible to EITHER end, exactly as the list is. Scoping to the
+    // user's own branch alone would hide an incoming transfer from the branch that
+    // has to book it in.
+    if (!scope.allBranches && scope.branchIds) {
+      const ids = [...scope.branchIds].map(String);
+      if (!ids.includes(String(transfer.from_branch_id)) && !ids.includes(String(transfer.to_branch_id))) {
+        throw new HttpError('That transfer belongs to branches you cannot see.', { status: 403, code: 'BRANCH_SCOPE_VIOLATION' });
+      }
+    }
+
+    // `i.batch_id` DOES NOT EXIST. A transfer line points at the batch it LEFT
+    // (`from_batch_id`) and, once received, the batch it became (`to_batch_id`). Reading
+    // a column that is not there made this route answer 500 EVERY TIME it was called —
+    // the screen that books a transfer in could not read the lines it was booking, and
+    // the partial-receipt flow that item ids exist for was unreachable from the UI. No
+    // test called it; `tools/flow-coverage.js` is what pointed at the flow.
+    const items = await db.all(`SELECT i.*, p.name AS product_name, p.sku, p.base_unit_name, v.name AS variant_name,
+          fb.batch_no AS from_batch_no, fb.expiry_date AS from_batch_expiry,
+          tb.batch_no AS to_batch_no
+        FROM stock_transfer_items i
+        LEFT JOIN products p ON p.id = i.product_id
+        LEFT JOIN product_variants v ON v.id = i.variant_id
+        LEFT JOIN stock_batches fb ON fb.id = i.from_batch_id
+        LEFT JOIN stock_batches tb ON tb.id = i.to_batch_id
+        WHERE i.transfer_id = ? AND i.is_deleted = 0
+        ORDER BY p.name, i.id`, [id]);
+
+    const sent = round2(items.reduce((a, i) => a + Number(i.quantity_sent_base || 0), 0));
+    const received = round2(items.reduce((a, i) => a + Number(i.quantity_received || 0), 0));
+    ctx.json({
+      ok: true, transfer, items,
+      // The same vocabulary the list answers: a deep link (a bookmarked transfer, a link in a
+      // message) renders without ever calling the list route, and it must not fall back to a
+      // vocabulary this file guessed.
+      statuses: TRANSFER_STATUSES,
+      receivable: TRANSFER_RECEIVABLE,
+      summary: {
+        lines: items.length,
+        unitsSent: sent,
+        unitsReceived: received,
+        unitsOutstanding: round2(sent - received),
+        // A shortfall is the number that matters: it is either still on the road
+        // or it never left the sending branch's shelf, and only a human can say
+        // which.
+        shortfall: round2(items.filter((i) => i.quantity_received != null && Number(i.quantity_received) < Number(i.quantity_sent_base))
+          .reduce((a, i) => a + (Number(i.quantity_sent_base) - Number(i.quantity_received)), 0)),
+        disclosed: items.filter((i) => i.quantity_received != null && Number(i.quantity_received) < Number(i.quantity_sent_base)).length,
+      },
+    });
+  });
+
+  app.post(`${base}/transfers`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager or above can move stock between branches.', { status: 403, code: 'ROLE_REQUIRED' });
+    const body = await ctx.req.json();
+    const from = await resolveBranch(db, ctx, { param: 'from_branch_id' });
+    const toBranchId = String(requireField(body, 'to_branch_id', 'Destination branch'));
+    if (toBranchId === String(from.id)) throw new HttpError('A transfer needs two different branches.', { status: 400, code: 'SAME_BRANCH' });
+    const to = await db.first('SELECT * FROM branches WHERE id = ? AND is_deleted = 0', [toBranchId]);
+    if (!to) throw new HttpError('That destination branch does not exist.', { status: 404, code: 'BRANCH_NOT_FOUND' });
+
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) throw new HttpError('A transfer needs at least one item.', { status: 400, code: 'EMPTY_TRANSFER' });
+
+    // INTER-COMPANY. Moving stock between two DIFFERENT businesses is a sale
+    // between legal entities, not a relocation. It has to post a receivable and a
+    // payable at transfer price, or the two businesses' margins silently
+    // cross-subsidise each other and neither P&L is true.
+    const intercompany = String(from.business_id) !== String(to.business_id);
+    if (intercompany && !atLeast(user.role, 'OWNER')) {
+      throw new HttpError('A transfer between two different businesses is a sale between legal entities and needs owner authority. It posts a receivable and a payable on both sets of books.', { status: 403, code: 'INTERCOMPANY_NEEDS_OWNER' });
+    }
+
+    const id = newId();
+    const fromTag = String(from.code || 'BR').replace(/[^A-Za-z0-9]/g, '').slice(0, 10).toUpperCase() || 'BR';
+    const reference = strField(body.reference, { field: 'Reference', maxLength: 40 }) || `TRF-${fromTag}-${Date.now().toString(36).toUpperCase()}`;
+    const dupe = await db.first('SELECT id FROM stock_transfers WHERE reference = ? AND is_deleted = 0', [reference]);
+    if (dupe) throw new HttpError(`A transfer with reference “${reference}” already exists.`, { status: 409, code: 'DUPLICATE_REFERENCE' });
+
+    const resolved = [];
+    for (const item of items) {
+      const productId = String(requireField(item, 'product_id', 'Product'));
+      const product = await db.first('SELECT * FROM products WHERE id = ? AND is_deleted = 0', [productId]);
+      if (!product) throw new HttpError('One of the products in this transfer does not exist.', { status: 404, code: 'PRODUCT_NOT_FOUND' });
+      const units = await db.all('SELECT * FROM product_units WHERE product_id = ? AND is_deleted = 0 ORDER BY quantity_in_base ASC', [productId]);
+      const ladder = buildLadder(units);
+      const unitCode = String(item.unit_code || (ladder.ok ? ladder.base.code : 'PIECE')).toUpperCase();
+      const qty = numField(requireField(item, 'quantity', 'Quantity'), { field: 'Quantity', min: 0.0001, places: 4 });
+      const conv = toBaseUnits({ quantity: qty, unitCode, ladder: ladder.ok ? ladder.ladder : [] });
+      if (!conv.ok) throw new HttpError(conv.error, { status: 400, code: conv.code });
+
+      const batch = item.batch_id
+        ? await db.first('SELECT * FROM stock_batches WHERE id = ? AND product_id = ? AND branch_id = ? AND is_deleted = 0', [String(item.batch_id), productId, String(from.id)])
+        : await db.first(`SELECT * FROM stock_batches WHERE product_id = ? AND branch_id = ? AND is_deleted = 0 AND status = 'ACTIVE'
+              AND quantity - quantity_reserved >= ?
+            ORDER BY expiry_date IS NULL, expiry_date, received_at, batch_no, id LIMIT 1`,
+        [productId, String(from.id), conv.baseQuantity]);
+      if (!batch) throw new HttpError(`There is not enough unreserved stock of ${product.name} at ${from.name} to transfer ${conv.baseQuantity} ${product.base_unit_name}.`, { status: 409, code: 'INSUFFICIENT_STOCK' });
+      resolved.push({ productId, product, unitCode, quantitySent: qty, quantityBase: conv.baseQuantity, batch, variantId: item.variant_id ? String(item.variant_id) : batch.variant_id });
+    }
+
+    const markup = numField(body.intercompany_markup_pct, { field: 'Intercompany markup', min: 0, max: 100 });
+    const accountIds = await glService.loadAccountCodes(db, from.business_id);
+    const toAccountIds = intercompany ? await glService.loadAccountCodes(db, to.business_id) : accountIds;
+
+    await db.transaction(async (tx) => {
+      let transferValue = 0;
+      tx.queue(`INSERT INTO stock_transfers (
+          id, reference, from_branch_id, to_branch_id, from_business_id, to_business_id, is_intercompany,
+          transfer_price, status, initiated_by, initiated_at, courier_name, courier_phone, vehicle_id, notes,
+          created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?, 'IN_TRANSIT', ?, datetime('now'), ?,?,?,?, datetime('now'), datetime('now'))`, [
+        id, reference, String(from.id), String(to.id), String(from.business_id), String(to.business_id),
+        intercompany ? 1 : 0, 0, String(user.id),
+        strField(body.courier_name, { field: 'Courier', maxLength: 120 }),
+        strField(body.courier_phone, { field: 'Courier phone', maxLength: 40 }),
+        body.vehicle_id ? String(body.vehicle_id) : null,
+        strField(body.notes, { field: 'Notes', maxLength: 500 }),
+      ]);
+
+      for (const r of resolved) {
+        const unitCost = Number(r.batch.cost_price_per_unit);
+        const unitTransferPrice = intercompany ? round2(unitCost * (1 + markup / 100)) : unitCost;
+        transferValue = round2(transferValue + r.quantityBase * unitTransferPrice);
+        tx.queue(`INSERT INTO stock_transfer_items (
+            id, transfer_id, product_id, variant_id, from_batch_id, unit_code, quantity_sent, quantity_sent_base,
+            quantity_received, unit_cost, unit_transfer_price, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,0,?,?, datetime('now'), datetime('now'))`, [
+          newId(), id, r.productId, r.variantId, String(r.batch.id), r.unitCode,
+          r.quantitySent, r.quantityBase, unitCost, unitTransferPrice,
+        ]);
+        // The stock leaves the sending branch NOW, not on receipt. Goods in
+        // transit are still an asset of the group, so the receiving side books
+        // them into 1110 rather than leaving them nowhere.
+        tx.queue(`UPDATE stock_batches SET quantity = quantity - ?, updated_at = datetime('now')
+            WHERE id = ? AND is_deleted = 0 AND quantity - quantity_reserved >= ?`,
+        [r.quantityBase, String(r.batch.id), r.quantityBase]);
+        tx.queue("UPDATE stock_batches SET status = CASE WHEN quantity <= 0 THEN 'DEPLETED' ELSE status END, updated_at = datetime('now') WHERE id = ?", [String(r.batch.id)]);
+      }
+      tx.queue("UPDATE stock_transfers SET transfer_price = ?, updated_at = datetime('now') WHERE id = ?", [transferValue, id]);
+
+      const statements = intercompany
+        ? glService.postIntercompanyTransferStatements({
+          transfer: { id, reference },
+          fromBusiness: { id: from.business_id, name: from.name }, toBusiness: { id: to.business_id, name: to.name },
+          fromBranch: from, toBranch: to, value: transferValue, accountIds, user,
+        })
+        : glService.postTransferStatements({
+          transfer: { id, reference }, business: { id: from.business_id },
+          fromBranch: from, toBranch: to, value: transferValue, accountIds, user,
+        });
+      for (const st of statements) tx.queue(st.sql, st.params);
+      void toAccountIds;
+    });
+
+    await recordFromCtx(ctx, {
+      action: 'TRANSFER_INITIATED', entityType: 'STOCK_TRANSFER', entityId: id, branchId: from.id, businessId: from.business_id,
+      after: { reference, to: to.name, intercompany, lines: resolved.length },
+    });
+    ctx.json({
+      ok: true, id, reference, intercompany,
+      message: `Transfer ${reference} dispatched from ${from.name} to ${to.name} (${resolved.length} line(s)).${intercompany ? ' Booked as an intercompany sale between the two businesses.' : ''}`,
+    }, 201);
+  });
+
+  /**
+   * Receive a transfer at the destination.
+   *
+   * The received quantity may be LESS than sent — goods break in transit, and a
+   * driver who arrives with 19 of 20 must be able to say so. The discrepancy is
+   * recorded per line rather than silently absorbed into the destination's stock.
+   */
+  app.post(`${base}/transfers/:id/receive`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    const body = await ctx.req.json();
+    const id = String(ctx.req.param('id'));
+    const transfer = await db.first('SELECT * FROM stock_transfers WHERE id = ? AND is_deleted = 0', [id]);
+    if (!transfer) throw new HttpError('That transfer does not exist.', { status: 404, code: 'TRANSFER_NOT_FOUND' });
+    if (transfer.status === 'RECEIVED') throw new HttpError('That transfer has already been received in full.', { status: 409, code: 'ALREADY_RECEIVED' });
+    if (transfer.status === 'CANCELLED') throw new HttpError('That transfer was cancelled — the stock went back to the sending branch. It cannot be booked in now.', { status: 409, code: 'TRANSFER_CANCELLED' });
+    // A TRANSFER ARRIVES IN LOADS. Being strict about `IN_TRANSIT` alone meant a delivery that
+    // came in two trips could never be closed: the first booking left the transfer PARTIALLY
+    // RECEIVED and the second was refused. Both statuses are bookable, and the balance per line
+    // is what the second booking carries.
+    if (!TRANSFER_RECEIVABLE.includes(String(transfer.status))) {
+      throw new HttpError(`Transfer ${transfer.reference} is ${String(transfer.status).toLowerCase().replace(/_/g, ' ')}, which cannot be booked in. Only a transfer that is in transit or partly received can be.`, { status: 409, code: 'NOT_RECEIVABLE' });
+    }
+
+    const to = await db.first('SELECT * FROM branches WHERE id = ?', [transfer.to_branch_id]);
+    const branch = await resolveBranch(db, ctx, { required: false });
+    if (branch && String(branch.id) !== String(to.id)) {
+      throw new HttpError(`That transfer is addressed to ${to.name}, not ${branch.name}. Only the receiving branch can book it in.`, { status: 403, code: 'BRANCH_SCOPE_VIOLATION' });
+    }
+
+    const items = await db.all('SELECT * FROM stock_transfer_items WHERE transfer_id = ? AND is_deleted = 0 ORDER BY product_id', [id]);
+    // Product rows and the sending branch's name are read HERE, not inside the
+    // transaction: the write phase may only queue.
+    const productById = new Map();
+    for (const it of items) {
+      if (!productById.has(String(it.product_id))) {
+        const pr = await db.first('SELECT * FROM products WHERE id = ?', [String(it.product_id)]);
+        productById.set(String(it.product_id), pr);
+      }
+    }
+    const fromBranch = await db.first('SELECT name FROM branches WHERE id = ?', [String(transfer.from_branch_id)]);
+    const fromBranchName = (fromBranch && fromBranch.name) || 'another branch';
+    const received = Array.isArray(body.items) ? body.items : null;
+    const accountIds = await glService.loadAccountCodes(db, transfer.to_business_id);
+
+    let receivedValue = 0;
+    let discrepancies = 0;
+    // `discrepancies` counts lines that arrived short THIS time (what the receipt message talks
+    // about); `shortfallRemaining` counts lines that are STILL short once this booking is
+    // written, which is what decides whether the transfer is RECEIVED or PARTIALLY_RECEIVED.
+    let shortfallRemaining = 0;
+    // WHAT THE TRANSFER IS WORTH NOW: every line's booked-in quantity (including anything booked
+    // on an earlier delivery) at its transfer price.
+    let receivedValueTotal = 0;
+    await db.transaction(async (tx) => {
+      for (const item of items) {
+        const override = received ? received.find((r) => String(r.item_id || r.id) === String(item.id)) : null;
+        // WHAT IS STILL OUTSTANDING ON THIS LINE. `quantity_received` holds what has ALREADY been
+        // booked in — 0 on the first delivery, part of the line after a short one. The default is
+        // therefore the REMAINDER, not the whole sent quantity: defaulting to the sent quantity
+        // would count the first delivery twice and invent stock that never arrived.
+        const alreadyOn = Number(item.quantity_received) || 0;
+        const outstanding = Math.max(0, roundTo(Number(item.quantity_sent_base) - alreadyOn, 4));
+        const qtyBase = override ? numField(override.quantity_received_base != null ? override.quantity_received_base : override.quantity_received, { field: 'Received quantity', min: 0, places: 4 }) : outstanding;
+        if (qtyBase > outstanding) {
+          throw new HttpError(`You cannot book in more than is still outstanding on this line: ${qtyBase} given${alreadyOn ? `, and ${alreadyOn} of the ${item.quantity_sent_base} already booked in` : ''}, leaving ${outstanding}. If extra goods arrived, they belong on a separate transfer so the discrepancy is visible.`, { status: 400, code: 'OVER_RECEIPT' });
+        }
+        const product = productById.get(String(item.product_id)) || null;
+        const unitTransferPrice = Number(item.unit_transfer_price) || Number(item.unit_cost) || 0;
+        const lineTotal = roundTo(alreadyOn + qtyBase, 4);
+        receivedValue = round2(receivedValue + qtyBase * unitTransferPrice);
+        receivedValueTotal = round2(receivedValueTotal + lineTotal * unitTransferPrice);
+        const stillShort = lineTotal < Number(item.quantity_sent_base);
+        if (stillShort) discrepancies += 1;
+        if (stillShort) shortfallRemaining += 1;
+
+        tx.queue(`UPDATE stock_transfer_items SET quantity_received = ?, received_at = datetime('now'), received_by = ?,
+            discrepancy_note = ?, updated_at = datetime('now') WHERE id = ?`, [
+          lineTotal, String(user.id),
+          stillShort ? (override && override.note ? String(override.note).slice(0, 500) : `Received ${lineTotal} of ${item.quantity_sent_base}`) : null,
+          String(item.id),
+        ]);
+
+        // The receiving branch gets its own batch at the transfer price. Keeping
+        // it as a separate batch preserves each branch's own cost history, which
+        // is what makes a per-branch margin meaningful.
+        const toBatchId = newId();
+        tx.queue(`INSERT INTO stock_batches (
+            id, branch_id, business_id, product_id, variant_id, batch_no, cost_price_per_unit, selling_price_per_unit,
+            quantity, quantity_reserved, initial_quantity, received_at, received_by, status, warehouse_zone, notes,
+            created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,0,?, datetime('now'), ?, 'ACTIVE', 'Transferred in', ?, datetime('now'), datetime('now'))`, [
+          toBatchId, String(to.id), String(transfer.to_business_id), item.product_id, item.variant_id,
+          transfer.reference, unitTransferPrice,
+          product ? Number(product.selling_price) : round2(unitTransferPrice * 1.3),
+          qtyBase, qtyBase, String(user.id),
+          `Received on transfer ${transfer.reference} from ${fromBranchName}`,
+        ]);
+        tx.queue('UPDATE stock_transfer_items SET to_batch_id = ? WHERE id = ?', [toBatchId, String(item.id)]);
+      }
+      // PARTIALLY_RECEIVED IS A REAL STATE, NOT A TYPO IN THE SCHEMA. The first booking of a
+      // delivery that arrived short leaves the transfer open so the rest can be booked when it
+      // turns up; only a booking that closes every line marks it RECEIVED. Writing RECEIVED on a
+      // short delivery made the shortfall invisible in every list and filter in the product.
+      // `transfer_price` HOLDS THE VALUE THAT ACTUALLY MOVED, so a second booking REPLACES it
+      // with the cumulative figure rather than adding to it or leaving the dispatched total in
+      // place: a delivery that arrived half full did not move the value of the whole manifest.
+      // `received_at` is stamped on every booking (that is what "last movement" means), and the
+      // status is what tells a reader whether the transfer is closed.
+      tx.queue(`UPDATE stock_transfers SET status = ?, received_by = ?, received_at = datetime('now'),
+          transfer_price = ?, updated_at = datetime('now') WHERE id = ?`,
+      [shortfallRemaining ? 'PARTIALLY_RECEIVED' : 'RECEIVED', String(user.id), receivedValueTotal, id]);
+    });
+
+    await recordFromCtx(ctx, {
+      action: 'TRANSFER_RECEIVED', entityType: 'STOCK_TRANSFER', entityId: id, branchId: to.id, businessId: transfer.to_business_id,
+      after: { reference: transfer.reference, receivedValue, discrepancies },
+    });
+    void accountIds;
+    const status = shortfallRemaining ? 'PARTIALLY_RECEIVED' : 'RECEIVED';
+    ctx.json({
+      ok: true,
+      status,
+      message: shortfallRemaining
+        ? `Part of transfer ${transfer.reference} booked in at ${to.name}: ${shortfallRemaining} line(s) are still outstanding. Book the rest in here when it arrives — the balance on each line is what is left, not what was sent.`
+        : `Transfer ${transfer.reference} is now fully received at ${to.name}.${discrepancies ? ` ${discrepancies} line(s) arrived short — the discrepancy is recorded against them.` : ''}`,
+      discrepancies, receivedValue,
+    });
+  });
+
+  /**
+   * Cancel a transfer that is not going to be received.
+   *
+   * THE SCHEMA HAS ALWAYS ALLOWED `CANCELLED` and nothing could ever write it: the list screen
+   * offered it as a filter, and a transfer that never arrived had no ending — it sat IN TRANSIT
+   * for ever, with the sending branch's stock deducted and neither branch able to count it. That
+   * is a stock hole with no way to close it.
+   *
+   * Cancelling GIVES THE STOCK BACK to the branch it left: the goods are on a truck that turned
+   * round, or a manifest that was never fulfilled. It returns only what has NOT been booked in
+   * (a partly received transfer returns the outstanding balance, because the rest really is at the
+   * receiving branch and cancelling it would invent stock on the sending side).
+   *
+   * Authority: the SENDING branch may cancel its own dispatch (MANAGER+), and an owner may cancel
+   * anything — the receiving branch cannot, because a receiver's answer to "it never came" is to
+   * leave it outstanding, not to rewrite the sender's records.
+   */
+  app.post(`${base}/transfers/:id/cancel`, idempotent(async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager or above can cancel a transfer.', { status: 403, code: 'ROLE_REQUIRED' });
+    const body = await ctx.req.json().catch(() => ({}));
+    const reason = strField(body.reason, { field: 'Reason', maxLength: 300 });
+    const id = String(ctx.req.param('id'));
+    const transfer = await db.first('SELECT * FROM stock_transfers WHERE id = ? AND is_deleted = 0', [id]);
+    if (!transfer) throw new HttpError('That transfer does not exist.', { status: 404, code: 'TRANSFER_NOT_FOUND' });
+    if (transfer.status === 'RECEIVED') {
+      throw new HttpError(`Transfer ${transfer.reference} has already been received in full — there is nothing left to cancel. Cancel it before it arrives, or record a return at the receiving branch.`, { status: 409, code: 'ALREADY_RECEIVED' });
+    }
+    if (transfer.status === 'CANCELLED') throw new HttpError(`Transfer ${transfer.reference} was already cancelled.`, { status: 409, code: 'ALREADY_CANCELLED' });
+
+    // ONLY THE SENDING END (or an owner) CAN CALL IT BACK.
+    const scope = ctx.get('scope');
+    const fromBranchId = String(transfer.from_branch_id);
+    const mayCancel = atLeast(user.role, 'OWNER') || String(user.branch_id || '') === fromBranchId
+      || (scope && scope.branchIds && [...scope.branchIds].some((b) => String(b) === fromBranchId));
+    if (!mayCancel) {
+      const from = await db.first('SELECT name FROM branches WHERE id = ?', [fromBranchId]);
+      throw new HttpError(`Only ${(from && from.name) || 'the sending branch'} can cancel this transfer — the stock left there and it is theirs until ${transfer.reference} is booked in. If it never arrived, ask them to cancel it.`, { status: 403, code: 'BRANCH_SCOPE_VIOLATION' });
+    }
+
+    const items = await db.all('SELECT * FROM stock_transfer_items WHERE transfer_id = ? AND is_deleted = 0 ORDER BY product_id', [id]);
+    const productById = new Map();
+    for (const it of items) {
+      if (!productById.has(String(it.product_id))) {
+        productById.set(String(it.product_id), await db.first('SELECT * FROM products WHERE id = ?', [String(it.product_id)]));
+      }
+    }
+    const from = await db.first('SELECT * FROM branches WHERE id = ?', [fromBranchId]);
+    let returnedUnits = 0;
+    let returnedValue = 0;
+    await db.transaction(async (tx) => {
+      for (const item of items) {
+        const alreadyOn = Number(item.quantity_received) || 0;
+        const comingBack = Math.max(0, roundTo(Number(item.quantity_sent_base) - alreadyOn, 4));
+        if (!(comingBack > 0)) continue;
+        const product = productById.get(String(item.product_id)) || null;
+        const unitTransferPrice = Number(item.unit_transfer_price) || Number(item.unit_cost) || 0;
+        returnedUnits = roundTo(returnedUnits + comingBack, 4);
+        returnedValue = round2(returnedValue + comingBack * unitTransferPrice);
+        // BACK AS ITS OWN BATCH, exactly as the receiving branch does: the sending branch's cost
+        // history stays readable, and the goods are sellable again from the moment this commits.
+        const backBatchId = newId();
+        tx.queue(`INSERT INTO stock_batches (
+            id, branch_id, business_id, product_id, variant_id, batch_no, cost_price_per_unit, selling_price_per_unit,
+            quantity, quantity_reserved, initial_quantity, received_at, received_by, status, warehouse_zone, notes,
+            created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,0,?, datetime('now'), ?, 'ACTIVE', 'Returned from transfer', ?, datetime('now'), datetime('now'))`, [
+          backBatchId, String(from.id), String(transfer.from_business_id), item.product_id, item.variant_id,
+          transfer.reference, unitTransferPrice,
+          product ? Number(product.selling_price) : round2(unitTransferPrice * 1.3),
+          comingBack, comingBack, String(user.id),
+          `Cancelled transfer ${transfer.reference}${reason ? ` — ${reason}` : ''}; stock returned to ${from.name}`,
+        ]);
+        tx.queue(`UPDATE stock_transfer_items SET from_batch_id = ?, discrepancy_note = ?, updated_at = datetime('now') WHERE id = ?`,
+          [backBatchId, `Cancelled: ${comingBack} of ${item.quantity_sent_base} returned to ${from.name}${reason ? ` — ${reason}` : ''}`, String(item.id)]);
+      }
+      tx.queue(`UPDATE stock_transfers SET status = 'CANCELLED', notes = COALESCE(?, notes), updated_at = datetime('now') WHERE id = ?`,
+        [reason ? `Cancelled by ${user.full_name || user.username}: ${reason}` : null, id]);
+    });
+
+    await recordFromCtx(ctx, {
+      action: 'TRANSFER_CANCELLED', entityType: 'STOCK_TRANSFER', entityId: id, branchId: from.id, businessId: transfer.from_business_id,
+      after: { reference: transfer.reference, reason: reason || null, returnedUnits, returnedValue, wasStatus: transfer.status },
+    });
+    ctx.json({
+      ok: true,
+      status: 'CANCELLED',
+      returnedUnits, returnedValue,
+      message: `${transfer.reference} cancelled. ${returnedUnits} unit(s) worth ₦${returnedValue.toLocaleString('en-NG')} are back on the shelf at ${from.name} and sellable again.`,
+    });
+  }));
+
+  // -------------------------------------------------------------------
+  // STOCKTAKES
+  // -------------------------------------------------------------------
+  app.get(`${base}/stocktakes`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const scope = ctx.get('scope');
+    const { limit, offset } = pagination(ctx);
+    const where = ['s.is_deleted = 0']; const params = [];
+    const f = scopeFilter(scope, { alias: 's' });
+    if (f.sql) { where.push(f.sql); params.push(...f.params); }
+
+    // A BRANCH THE CALLER NAMED NARROWS THIS LIST — see branchFilter() in lib/respond.
+    const bf = await branchFilter(db, ctx, { alias: 's' });
+    if (bf.sql) { where.push(bf.sql); params.push(...bf.params); }
+    if (ctx.req.queryParam('in_progress') === '1') where.push("s.status IN ('OPEN','COUNTING')");
+    else if (ctx.req.queryParam('status')) { where.push('s.status = ?'); params.push(String(ctx.req.queryParam('status'))); }
+    const rows = await db.all(`SELECT s.*, b.name AS branch_name, u.full_name AS opened_by_name,
+          (SELECT COUNT(*) FROM stocktake_lines l WHERE l.stocktake_id = s.id AND l.is_deleted = 0) AS line_count,
+          (SELECT COUNT(*) FROM stocktake_lines l WHERE l.stocktake_id = s.id AND l.is_deleted = 0 AND COALESCE(l.variance,0) <> 0) AS variance_count
+        FROM stocktake_sessions s
+        LEFT JOIN branches b ON b.id = s.branch_id
+        LEFT JOIN users u ON u.id = s.opened_by
+        WHERE ${where.join(' AND ')} ORDER BY s.opened_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    ctx.json(listResponse(rows, { limit, offset }));
+  });
+
+  /**
+   * Open a stocktake.
+   *
+   * The system quantity is FROZEN into each line at open time. Counting against
+   * a live figure means a sale rung up mid-count changes the variance under the
+   * counter's feet, and the resulting adjustment corrects for stock that was
+   * never missing.
+   */
+  app.post(`${base}/stocktakes`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager or above can open a stocktake.', { status: 403, code: 'ROLE_REQUIRED' });
+    const body = await ctx.req.json();
+    const branch = await resolveBranch(db, ctx);
+    const business = await resolveBusiness(db, ctx, branch);
+
+    const open = await db.first("SELECT * FROM stocktake_sessions WHERE branch_id = ? AND status IN ('OPEN','COUNTING') AND is_deleted = 0", [String(branch.id)]);
+    if (open) {
+      // One open count per branch. Two concurrent stocktakes over the same shelf
+      // produce two sets of variances for the same units, and the second commit
+      // adjusts stock the first already corrected.
+      throw new HttpError(`${branch.name} already has a stocktake in progress (${open.reference || 'unnumbered'}, opened ${open.opened_at}). Commit or cancel it before starting another.`, { status: 409, code: 'STOCKTAKE_IN_PROGRESS' });
+    }
+
+    const scope = String(body.scope || 'FULL').toUpperCase();
+    const scopeFilterJson = body.scope_filter ? JSON.stringify(body.scope_filter) : null;
+    const id = newId();
+    const reference = strField(body.reference, { field: 'Reference', maxLength: 40 }) || `ST-${branch.code || branch.id.slice(0, 4)}-${Date.now().toString(36).toUpperCase().slice(-4)}`;
+
+    const where = ['sb.branch_id = ?', 'sb.is_deleted = 0'];
+    const params = [String(branch.id)];
+    if (scope === 'CATEGORY' && body.category_id) { where.push('p.category_id = ?'); params.push(String(body.category_id)); }
+    if (scope === 'PRODUCT' && body.product_id) { where.push('sb.product_id = ?'); params.push(String(body.product_id)); }
+    if (scope === 'ZONE' && body.zone) { where.push('sb.warehouse_zone = ?'); params.push(String(body.zone)); }
+
+    const batches = await db.all(`SELECT sb.*, p.name AS product_name, p.base_unit_name FROM stock_batches sb
+        JOIN products p ON p.id = sb.product_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY p.name, sb.batch_no, sb.id`, params);
+
+    await db.transaction(async (tx) => {
+      tx.queue(`INSERT INTO stocktake_sessions (
+          id, branch_id, business_id, reference, scope, scope_filter_json, status, opened_by, opened_at, notes,
+          created_at, updated_at)
+        VALUES (?,?,?,?,?,?, 'COUNTING', ?, datetime('now'), ?, datetime('now'), datetime('now'))`, [
+        id, String(branch.id), String(business.id), reference, scope, scopeFilterJson, String(user.id),
+        strField(body.notes, { field: 'Notes', maxLength: 500 }),
+      ]);
+      for (const b of batches) {
+        tx.queue(`INSERT INTO stocktake_lines (
+            id, stocktake_id, product_id, variant_id, batch_id, warehouse_zone, system_qty, counted_qty, variance, notes,
+            created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?, NULL, NULL, NULL, datetime('now'), datetime('now'))`, [
+          newId(), id, b.product_id, b.variant_id, b.id, b.warehouse_zone, Number(b.quantity),
+        ]);
+      }
+    });
+
+    await recordFromCtx(ctx, { action: 'STOCKTAKE_OPENED', entityType: 'STOCKTAKE', entityId: id, branchId: branch.id, businessId: business.id, after: { reference, scope, lines: batches.length } });
+    ctx.json({ ok: true, id, reference, lines: batches.length, message: `Stocktake ${reference} opened with ${batches.length} line(s). The system quantities are frozen — counting will not be disturbed by sales rung up meanwhile.` }, 201);
+  });
+
+  app.get(`${base}/stocktakes/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const id = String(ctx.req.param('id'));
+    const session = await db.first('SELECT s.*, b.name AS branch_name FROM stocktake_sessions s LEFT JOIN branches b ON b.id = s.branch_id WHERE s.id = ? AND s.is_deleted = 0', [id]);
+    if (!session) throw new HttpError('That stocktake does not exist.', { status: 404, code: 'STOCKTAKE_NOT_FOUND' });
+    const lines = await db.all(`SELECT l.*, p.name AS product_name, p.sku, p.base_unit_name, v.name AS variant_name,
+          b.cost_price_per_unit, b.batch_no
+        FROM stocktake_lines l
+        JOIN products p ON p.id = l.product_id
+        LEFT JOIN product_variants v ON v.id = l.variant_id
+        LEFT JOIN stock_batches b ON b.id = l.batch_id
+        WHERE l.stocktake_id = ? AND l.is_deleted = 0
+        ORDER BY p.name, b.batch_no`, [id]);
+    ctx.json({
+      ok: true, session,
+      lines: lines.map((l) => ({
+        ...l,
+        variance_value: l.variance == null ? null : round2(Number(l.variance) * Number(l.cost_price_per_unit || 0)),
+      })),
+      summary: {
+        lines: lines.length,
+        counted: lines.filter((l) => l.counted_qty != null).length,
+        outstanding: lines.filter((l) => l.counted_qty == null).length,
+        withVariance: lines.filter((l) => Number(l.variance) !== 0).length,
+        varianceValue: round2(lines.reduce((a, l) => a + Math.abs(Number(l.variance || 0) * Number(l.cost_price_per_unit || 0)), 0)),
+      },
+    });
+  });
+
+  /** Record counts. Repeatable — a counter can correct a line before committing. */
+  app.post(`${base}/stocktakes/:id/counts`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    const id = String(ctx.req.param('id'));
+    const session = await db.first('SELECT * FROM stocktake_sessions WHERE id = ? AND is_deleted = 0', [id]);
+    if (!session) throw new HttpError('That stocktake does not exist.', { status: 404, code: 'STOCKTAKE_NOT_FOUND' });
+    if (session.status === 'COMMITTED') throw new HttpError('That stocktake is already committed. Open a new one to recount.', { status: 409, code: 'ALREADY_COMMITTED' });
+
+    const body = await ctx.req.json();
+    const counts = Array.isArray(body.counts) ? body.counts : [];
+    if (!counts.length) throw new HttpError('Send a `counts` array of { line_id, counted_qty }.', { status: 400, code: 'MISSING_FIELD' });
+
+    // Validate every line BEFORE opening the transaction. Doing it inside would
+    // mean awaiting a read in the write phase, and it would also let a bad line
+    // id abort the transaction after good counts had already been queued.
+    const sessionLines = await db.all('SELECT * FROM stocktake_lines WHERE stocktake_id = ? AND is_deleted = 0', [id]);
+    const lineById = new Map(sessionLines.map((l) => [String(l.id), l]));
+    const prepared = counts.map((c, i) => {
+      const lineId = String(requireField(c, 'line_id', 'Line'));
+      const counted = numField(c.counted_qty, { field: 'Counted quantity', min: 0, places: 4 });
+      const line = lineById.get(lineId);
+      if (!line) throw new HttpError(`Count line ${lineId.slice(0, 8)} is not part of this stocktake.`, { status: 404, code: 'LINE_NOT_FOUND' });
+      return { lineId, counted, line, note: strField(c.notes, { field: 'Note', maxLength: 300 }) };
+    });
+
+    let updated = 0;
+    await db.transaction(async (tx) => {
+      for (const c of prepared) {
+        const { lineId, counted, line, note } = c;
+        tx.queue(`UPDATE stocktake_lines SET counted_qty = ?, variance = ?, counted_by = ?, counted_at = datetime('now'),
+            notes = ?, updated_at = datetime('now') WHERE id = ?`, [
+          counted, round2(counted - Number(line.system_qty)), String(user.id),
+          note, lineId,
+        ]);
+        updated += 1;
+      }
+      tx.queue("UPDATE stocktake_sessions SET status = 'COUNTING', updated_at = datetime('now') WHERE id = ?", [id]);
+    });
+    ctx.json({ ok: true, updated, message: `${updated} count(s) recorded.` });
+  });
+
+  /**
+   * Commit a stocktake: post every variance as an adjustment and correct stock.
+   *
+   * This is the point of no return, so it refuses to run while any line is
+   * uncounted unless the caller explicitly says the remainder was not counted.
+   * Committing a half-finished sheet would write off everything nobody got to.
+   */
+  app.post(`${base}/stocktakes/:id/commit`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager or above can commit a stocktake.', { status: 403, code: 'ROLE_REQUIRED' });
+    const id = String(ctx.req.param('id'));
+    const body = await ctx.req.json();
+    const session = await db.first('SELECT * FROM stocktake_sessions WHERE id = ? AND is_deleted = 0', [id]);
+    if (!session) throw new HttpError('That stocktake does not exist.', { status: 404, code: 'STOCKTAKE_NOT_FOUND' });
+    if (session.status === 'COMMITTED') throw new HttpError('That stocktake is already committed.', { status: 409, code: 'ALREADY_COMMITTED' });
+
+    const branch = await db.first('SELECT * FROM branches WHERE id = ?', [session.branch_id]);
+    const uncounted = await db.scalar('SELECT COUNT(*) FROM stocktake_lines WHERE stocktake_id = ? AND counted_qty IS NULL AND is_deleted = 0', [id]);
+    if (uncounted > 0 && !boolField(body.accept_uncounted)) {
+      throw new HttpError(
+        `${uncounted} line(s) have not been counted. Count them, or pass accept_uncounted: true to commit with the uncounted lines left at their system quantity. Committing silently would treat an unfinished sheet as a finished one.`,
+        { status: 409, code: 'STOCKTAKE_INCOMPLETE' },
+      );
+    }
+
+    const lines = await db.all(`SELECT l.*, b.cost_price_per_unit, b.quantity AS batch_quantity, b.quantity_reserved
+        FROM stocktake_lines l LEFT JOIN stock_batches b ON b.id = l.batch_id
+        WHERE l.stocktake_id = ? AND l.is_deleted = 0 AND l.counted_qty IS NOT NULL AND COALESCE(l.variance, 0) <> 0`, [id]);
+    const accountIds = await glService.loadAccountCodes(db, session.business_id);
+    let varianceValue = 0;
+    let unitsVariance = 0;
+
+    await db.transaction(async (tx) => {
+      for (const line of lines) {
+        const variance = Number(line.variance);
+        const unitCost = Number(line.cost_price_per_unit) || 0;
+        const value = round2(variance * unitCost);
+        varianceValue = round2(varianceValue + Math.abs(value));
+        unitsVariance += Math.abs(variance);
+
+        const adjustmentId = newId();
+        tx.queue(`INSERT INTO stock_adjustments (
+            id, branch_id, business_id, batch_id, product_id, variant_id, adjustment_type, quantity,
+            unit_cost, total_value, reason, stocktake_id, requires_approval, created_by, created_at, updated_at)
+          VALUES (?,?,?,?,?,?, 'COUNT_VARIANCE', ?,?,?,?, ?, 0, ?, datetime('now'), datetime('now'))`, [
+          adjustmentId, String(session.branch_id), String(session.business_id),
+          line.batch_id ? String(line.batch_id) : null, line.product_id, line.variant_id,
+          variance, unitCost, value,
+          `Stocktake ${session.reference || id.slice(0, 8)}: counted ${line.counted_qty}, system said ${line.system_qty}`,
+          id, String(user.id),
+        ]);
+        if (line.batch_id) {
+          // Guarded the same way a sale is: the count is applied to the batch, and
+          // a concurrent sale that emptied it fails this commit rather than
+          // driving the quantity negative.
+          tx.queue(`UPDATE stock_batches SET quantity = ?, updated_at = datetime('now')
+              WHERE id = ? AND is_deleted = 0 AND ? >= quantity_reserved`, [
+            Number(line.counted_qty), String(line.batch_id), Number(line.counted_qty),
+          ]);
+          tx.queue("UPDATE stock_batches SET status = CASE WHEN quantity <= 0 THEN 'DEPLETED' ELSE status END, updated_at = datetime('now') WHERE id = ?", [String(line.batch_id)]);
+        }
+        for (const st of glService.postAdjustmentStatements({
+          adjustment: { id: adjustmentId, adjustment_type: 'COUNT_VARIANCE', quantity: variance, total_value: value, reason: `Stocktake ${session.reference || ''}` },
+          business: { id: session.business_id }, branch: { id: session.branch_id }, accountIds, user,
+        })) tx.queue(st.sql, st.params);
+      }
+      tx.queue(`UPDATE stocktake_sessions SET status = 'COMMITTED', committed_by = ?, committed_at = datetime('now'),
+          total_variance_value = ?, notes = COALESCE(notes,'') || ?, updated_at = datetime('now') WHERE id = ?`, [
+        String(user.id), varianceValue,
+        uncounted ? ` | Committed with ${uncounted} uncounted line(s) left at system quantity.` : '',
+        id,
+      ]);
+    });
+
+    await recordFromCtx(ctx, {
+      action: 'STOCKTAKE_COMMITTED', entityType: 'STOCKTAKE', entityId: id, branchId: session.branch_id, businessId: session.business_id,
+      after: { reference: session.reference, lines: lines.length, varianceValue, unitsVariance, uncounted },
+    });
+    ctx.json({
+      ok: true,
+      message: `Stocktake ${session.reference || ''} committed: ${lines.length} variance(s) posted, ₦${varianceValue.toLocaleString('en-NG')} of stock value adjusted.`,
+      varianceLines: lines.length, varianceValue, unitsVariance, uncounted,
+    });
+  });
+
+  /** Products whose expiry is inside the alert window. */
+  app.get(`${base}/stock/expiring`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const branch = await resolveBranch(db, ctx, { required: false });
+    const settings = ctx.get('settings');
+    const days = numField(ctx.req.queryParam('days') || settings.expiry_alert_days || 60, { field: 'Days', min: 1, max: 720, whole: true });
+    const where = ["sb.expiry_date IS NOT NULL", 'sb.is_deleted = 0', "sb.status <> 'EXPIRED'", `sb.expiry_date <= date('now', '+${days} days')`];
+    const params = [];
+    if (branch) { where.push('sb.branch_id = ?'); params.push(String(branch.id)); }
+    const rows = await db.all(`SELECT sb.id, sb.batch_no, sb.expiry_date, sb.quantity, sb.quantity_reserved,
+          sb.cost_price_per_unit, sb.branch_id, b.name AS branch_name, p.id AS product_id, p.name AS product_name, p.sku
+        FROM stock_batches sb JOIN products p ON p.id = sb.product_id
+        LEFT JOIN branches b ON b.id = sb.branch_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY sb.expiry_date ASC, p.name LIMIT 500`, params);
+    ctx.json({
+      ok: true, days,
+      data: rows.map((r) => ({
+        ...r,
+        days_to_expiry: Math.round((Date.parse(r.expiry_date) - Date.parse(watToday())) / 86400000),
+        expired: r.expiry_date < watToday(),
+        value_at_risk: round2(Number(r.quantity) * Number(r.cost_price_per_unit)),
+      })),
+    });
+  });
+}
+
+module.exports = { mount, ADJUSTMENT_TYPES };

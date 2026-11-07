@@ -1,0 +1,38 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.netrc
+.git-credentials
+android/local.properties
+
+# Local data
+.data/
+*.db
+*.db-wal
+*.db-shm
+*.db.jwt
+
+# Dependencies and generated output
+node_modules/
+.wrangler/
+.cache/
+build/
+dist/
+coverage/
+.gradle/
+android/.gradle/
+android/app/build/
+*.apk
+*.aab
+*.log
+.cloudflare-output.txt
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

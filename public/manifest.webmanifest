@@ -1,0 +1,13 @@
+{
+  "name": "StockRidge",
+  "short_name": "StockRidge",
+  "description": "Inventory, POS and back-office for Nigerian retail and wholesale businesses",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f7f4",
+  "theme_color": "#07290c",
+  "icons": [
+    {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml"}
+  ]
+}

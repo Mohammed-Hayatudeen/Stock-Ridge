@@ -1,0 +1,1233 @@
+'use strict';
+// =====================================================================
+// server/routes/sync.js — OFFLINE-FIRST RECONCILIATION
+// =====================================================================
+// The PWA works with no network: a phone in a Lagos shop on a bad MTN signal
+// still rings up sales, and those sales are queued locally and replayed later.
+// This module is what makes that safe.
+//
+// THE CENTRAL DECISION: offline work is queued as OPERATIONS, never as ROWS.
+//
+// An offline sale is stored on the device as "this cart, these payments, at this
+// time" and replayed through POST /api/sales. It is NOT stored as a `sales` row
+// and an `sale_items` row to be written directly. The difference is everything:
+//
+//   * A sale written as rows would skip FIFO batch selection, so the stock
+//     decrement would not know which batch to take from.
+//   * It would skip the ledger, so the books would not balance.
+//   * It would skip the receipt-number sequence, so two devices offline at once
+//     would both claim receipt 0042.
+//   * It would skip the credit-limit check, because that needs the customer's
+//     CURRENT balance, which the device cannot know.
+//
+// Replaying the OPERATION through the real endpoint means an offline sale is
+// subject to exactly the same rules as an online one. The engine stays the only
+// writer.
+//
+// LAST-WRITE-WINS APPLIES ONLY to a small whitelist of descriptive tables, and
+// even there it CAPTURES the losing version rather than discarding it, because
+// "the other device's edit vanished" is unanswerable without it.
+//
+// TENANT ISOLATION — the trap this must not fall into:
+// Force-scoping `branch_id` on INSERT is correct. Doing the same on UPDATE is
+// not: it REPARENTS another branch's row into the caller's branch instead of
+// refusing the write. So an UPDATE first verifies the row is already in scope,
+// and `branch_id`/`business_id` are never taken from client data.
+// =====================================================================
+
+const { HttpError } = require('../lib/http');
+const { recordFromCtx } = require('../lib/audit');
+const { atLeast } = require('../../domain/roles');
+const { resolveBranch, resolveBusiness, readBusinessId, pagination, listResponse, strField, boolField } = require('../lib/respond');
+const { round2 } = require('../../domain/money');
+const { newId } = require('../../domain/crypto');
+const { watNow, watToday, utcNow, toUtcSql, utcToWat, claimedWatToUtcSql } = require('../../domain/time');
+const { watermarkPage } = require('../../domain/sync-watermark');
+const { signReplay } = require('../lib/replay');
+const saleIssues = require('../services/saleIssues');
+
+/**
+ * Tables whose rows a device may write directly, and the columns it may write.
+ *
+ * Deliberately tiny. Anything that moves stock, touches money, or posts to the
+ * ledger must come through its own endpoint so the engine runs. A whitelist that
+ * grew to include `sales` would be a second, unguarded sale path.
+ */
+const LWW_TABLES = {
+  customers: {
+    pk: 'id',
+    // Contact and descriptive fields only. `credit_balance` is a cache of the
+    // debtor ledger and `credit_limit` is an authority decision — neither may be
+    // written by a device, or an offline edit could erase a debt.
+    columns: ['name', 'company_name', 'phone', 'alt_phone', 'email', 'address', 'city', 'state', 'latitude', 'longitude', 'gps_label', 'tin', 'cac_reg_no', 'notes', 'customer_type'],
+    scopeColumn: 'branch_id',
+  },
+  notifications: {
+    pk: 'id', columns: ['is_read', 'read_at'], scopeColumn: 'branch_id',
+  },
+  delivery_jobs: {
+    // A driver in the field updating a drop status is the canonical offline
+    // write. Money columns are excluded: the fee is set when the job is created.
+    pk: 'id', columns: ['status', 'delivered_at', 'delivered_to', 'proof_of_delivery', 'notes', 'attempts', 'latitude', 'longitude', 'transaction_note', 'settlement'],
+    scopeColumn: 'branch_id',
+  },
+  stocktake_lines: {
+    // Counts are taken offline on a clipboard or a phone in a warehouse with no
+    // signal. The COMMIT that turns counts into adjustments is NOT syncable — it
+    // must run online, because it posts to the ledger.
+    //
+    // A count line carries no branch_id of its own: it belongs to a session which
+    // belongs to a branch. "No branch column therefore no restriction" would let
+    // a device at one branch edit another branch's counts, so the branch is
+    // resolved through the parent session before the write is allowed.
+    pk: 'id', columns: ['counted_qty', 'variance', 'counted_by', 'counted_at', 'notes'], scopeColumn: null,
+    resolveBranch: {
+      column: 'stocktake_id',
+      sql: 'SELECT branch_id FROM stocktake_sessions WHERE id = ?',
+      result: 'branch_id',
+    },
+  },
+};
+
+/** Operations a device may replay, mapped to the endpoint that owns them. */
+const REPLAYABLE = {
+  SALE: { method: 'POST', path: '/api/sales' },
+  SALE_VOID: { method: 'POST', path: '/api/sales/:id/void' },
+  SALE_PAYMENT: { method: 'POST', path: '/api/sales/:id/pay' },
+  CUSTOMER_PAYMENT: { method: 'POST', path: '/api/customers/:id/payments' },
+  STOCK_ADJUST: { method: 'POST', path: '/api/stock/adjust' },
+  CLOCK_IN: { method: 'POST', path: '/api/attendance/clock-in' },
+  CLOCK_OUT: { method: 'POST', path: '/api/attendance/clock-out' },
+  STOCKTAKE_COUNTS: { method: 'POST', path: '/api/stocktakes/:id/counts' },
+  DELIVERY_STATUS: { method: 'POST', path: '/api/deliveries/:id/status' },
+  DEPOSIT_PAYMENT: { method: 'POST', path: '/api/deposits/:id/payments' },
+  INSTALMENT_PAYMENT: { method: 'POST', path: '/api/instalments/:id/payments' },
+  EXPENSE: { method: 'POST', path: '/api/expenses' },
+};
+
+function mount(app, base = '/api') {
+  // -------------------------------------------------------------------
+  // PUSH
+  // -------------------------------------------------------------------
+  /**
+   * Push a device's offline queue.
+   *
+   * Two channels in one request, applied in this order:
+   *   1. OPERATIONS, replayed through the real endpoints with the device's
+   *      Idempotency-Key, so a retry cannot double-apply them.
+   *   2. ROW MUTATIONS, LWW over the whitelist.
+   *
+   * The response reports the outcome of EACH item rather than failing the whole
+   * batch. A queue of forty offline sales where one has an expired credit limit
+   * must still post the other thirty-nine — refusing the batch would strand real
+   * takings on a phone until somebody worked out which sale was the problem.
+   */
+  app.post(`${base}/sync/push`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    const body = await ctx.req.json();
+    // The branch is OPTIONAL here, deliberately.
+    //
+    // An OPERATION replayed from a device goes back through its own endpoint, so
+    // that endpoint resolves (and enforces) its own branch. Requiring one up
+    // front would fail an entire queue — a cashier's whole day of sales — because
+    // of one malformed item, and would leave the platform administrator (who has
+    // no pinned branch) unable to sync at all.
+    //
+    // A ROW MUTATION does need a branch, because a new row is born in the branch
+    // that created it; where there is none, that single mutation is refused and
+    // the rest of the batch still runs.
+    const branch = await resolveBranch(db, ctx, { required: false });
+    const business = await resolveBusiness(db, ctx, branch);
+    const deviceId = strField(body.device_id || body.deviceId || ctx.req.header('X-Device-Id'), { field: 'Device', maxLength: 120 });
+    if (!deviceId) {
+      throw new HttpError('A sync push must identify the device it came from. Two devices syncing the same queue is how a sale gets recorded twice.', { status: 400, code: 'DEVICE_ID_REQUIRED' });
+    }
+    const appVersion = strField(body.app_version || body.appVersion, { field: 'App version', maxLength: 40 });
+    const clientTime = strField(body.client_time || body.clientTime, { field: 'Client time', maxLength: 40 });
+
+    const operations = Array.isArray(body.operations) ? body.operations : [];
+    const mutations = Array.isArray(body.mutations) ? body.mutations : [];
+    if (!operations.length && !mutations.length) {
+      throw new HttpError('Nothing to sync. Send `operations` and/or `mutations`.', { status: 400, code: 'EMPTY_SYNC' });
+    }
+    if (operations.length + mutations.length > 500) {
+      // A cap, because an unbounded queue replayed in one request holds a
+      // transaction open long enough to block the counter.
+      throw new HttpError(`That is ${operations.length + mutations.length} items; the limit per sync is 500. Split it into batches — a huge queue is usually a device that has not synced in days and should be checked.`, { status: 400, code: 'SYNC_BATCH_TOO_LARGE' });
+    }
+
+    // Skew between the device clock and the server is recorded, not corrected.
+    // A device whose clock is wrong will produce `sold_at` values in the future,
+    // which the sale engine already refuses; silently rewriting the client's
+    // timestamps would hide a misconfigured phone.
+    let clockSkewMinutes = null;
+    if (clientTime) {
+      const c = Date.parse(clientTime);
+      if (Number.isFinite(c)) clockSkewMinutes = Math.round((c - Date.now()) / 60000);
+    }
+
+    const results = { operations: [], mutations: [] };
+    let applied = 0; let rejected = 0; let conflicts = 0; let quarantined = 0;
+
+    // THE CLEANUP WATERMARK, read once per sync rather than per operation.
+    //
+    // A device that was offline while a cleanup ran is holding operations that
+    // describe a shop that no longer exists in this database: a sale for a product
+    // that was purged, a transfer against a batch that is gone. Applying them would
+    // RE-CREATE THE VERY ROWS THE OWNER DELETED, days later, from a queue nobody is
+    // watching — and it would look, in the audit trail, exactly like ordinary trade.
+    //
+    // The watermark is deployment-wide rather than per business, deliberately.
+    // `data_cleanup_log` records a run against a deployment, and on a multi-business
+    // deployment the conservative error is the cheap one: quarantining a stale replay
+    // that belonged to a neighbouring business costs a manager thirty seconds of
+    // review, while applying one recreates records that were deleted on purpose.
+    const watermark = await db.scalar('SELECT MAX(created_at) FROM data_cleanup_log');
+    const lastCleanupAt = watermark ? String(watermark) : null;
+
+    // ---- 1. OPERATIONS: replayed through the real HTTP endpoints.
+    //
+    // Going through `app.handle` rather than calling the service directly means
+    // the operation passes through the SAME middleware — auth, settings load,
+    // idempotency — as an online request. Calling the service directly would be a
+    // second entry point with a second set of guarantees.
+    for (const op of operations) {
+      const kind = String(op.type || op.kind || '').toUpperCase();
+      const route = REPLAYABLE[kind];
+      if (!route) {
+        results.operations.push({ clientId: op.client_id || op.clientId || null, type: kind, status: 'REJECTED', code: 'UNKNOWN_OPERATION', message: `“${kind}” cannot be synced from a device. It has to be done online.` });
+        rejected += 1;
+        continue;
+      }
+      const key = strField(op.idempotency_key || op.idempotencyKey || op.client_id || op.clientId, { field: 'Idempotency key', maxLength: 128 });
+      if (!key) {
+        results.operations.push({ clientId: null, type: kind, status: 'REJECTED', code: 'IDEMPOTENCY_KEY_REQUIRED', message: 'Every queued operation needs an idempotency key, or a retried sync would apply it twice.' });
+        rejected += 1;
+        continue;
+      }
+
+      // ---- QUARANTINE: queued BEFORE the last cleanup, applied NEVER.
+      if (lastCleanupAt) {
+        const occurredAt = strField(op.occurred_at || op.occurredAt || '', { field: 'Occurred at', maxLength: 40 });
+        // The queue stamps West Africa wall clock. The cleanup watermark is
+        // UTC `datetime('now')`. Comparing the strings leaves an hour in which
+        // a sale that happened before the cleanup sorts as if it happened after,
+        // and would be applied — putting back rows the owner deleted.
+        const occurredUtc = claimedWatToUtcSql(occurredAt);
+        const cleanupUtc = toUtcSql(lastCleanupAt) || String(lastCleanupAt).slice(0, 19);
+        if (occurredUtc && cleanupUtc && occurredUtc < cleanupUtc) {
+          quarantined += 1;
+          // STORED, NOT DISCARDED. The device's operation is evidence: it says what
+          // the shop believed had happened, and a manager may need to re-enter it by
+          // hand. Conflict storage already exists for exactly this "the server wins
+          // but keep what the device sent" case, so it is used rather than a new table.
+          const conflictId = newId();
+          await db.run(`INSERT INTO sync_conflicts (
+              id, table_name, row_id, branch_id, device_id, losing_version_json, winning_version_json, detected_at)
+            VALUES (?,?,?,?,?,?,?, datetime('now'))`, [
+            conflictId, 'offline_queue', key, branch ? String(branch.id) : null, deviceId,
+            JSON.stringify({ type: kind, occurred_at: occurredAt, payload: op.payload || op.data || op.body || null }),
+            JSON.stringify({ applied: false, reason: 'STALE_AFTER_CLEANUP', last_cleanup_at: lastCleanupAt, quarantined_at: new Date().toISOString() }),
+          ]);
+          try {
+            await saleIssues.noteQuarantine(db, {
+              conflictId, clientId: key, branchId: branch ? String(branch.id) : null, kind, occurredAt,
+            });
+          } catch (e) {
+            if (!saleIssues.missingTable(e)) console.error('[sale-issues]', e && e.message);
+          }
+          results.operations.push({
+            clientId: key, type: kind, status: 'QUARANTINED', code: 'STALE_AFTER_CLEANUP',
+            message: `This was queued before the data cleanup of ${utcToWat(lastCleanupAt) || lastCleanupAt} (Lagos time) and was NOT applied — replaying it would put back records that were deliberately removed. It is stored under Sync → Conflicts for a manager to review and re-enter by hand if it is still true.`,
+          });
+          continue;
+        }
+      }
+
+      // Substitute the path parameters. A missing one is a device-side bug and
+      // is reported against that operation only.
+      let path = route.path;
+      const params = op.params || op.pathParams || {};
+      let missingParam = null;
+      path = path.replace(/:([A-Za-z_][\w]*)/g, (_, name) => {
+        const v = params[name];
+        if (v === undefined || v === null || String(v) === '') { missingParam = name; return ''; }
+        return encodeURIComponent(String(v));
+      });
+      if (missingParam) {
+        results.operations.push({ clientId: key, type: kind, status: 'REJECTED', code: 'MISSING_PATH_PARAM', message: `The queued ${kind} has no ${missingParam}, so it cannot be replayed.` });
+        rejected += 1;
+        continue;
+      }
+
+      // `sold_at` is carried from the device so the sale lands in the till and
+      // the trading day it actually happened in, not the day the phone found a
+      // signal. The engine still enforces the 90-day window and the 10-minute
+      // future skew. A signed replay is how a staff sale from this morning is
+      // allowed through; the browser cannot forge that signature.
+      const payload = Object.assign({}, op.payload || op.data || op.body || {});
+      payload.device_id = payload.device_id || deviceId;
+      if (op.occurred_at || op.occurredAt) {
+        const when = op.occurred_at || op.occurredAt;
+        payload.sold_at = payload.sold_at || when;
+        // A clock-in queued offline must land at the moment the button was
+        // pressed, not at the moment the phone found a signal. The route
+        // accepts this only on a signed replay.
+        if (kind === 'CLOCK_IN' || kind === 'CLOCK_OUT') payload.clocked_at = payload.clocked_at || when;
+      }
+
+      try {
+        // Replayed through `app.fetch`, the same entry point the HTTP server uses.
+        // The Authorization header is forwarded rather than the user object being
+        // injected, so the replayed request re-authenticates and re-derives its
+        // scope exactly as an online one would — an operation queued by a cashier
+        // must still be refused if that cashier has since been deactivated.
+        // The replay header is a signature over this idempotency key. A browser
+        // can send the header name; it cannot produce the signature.
+        const replaySig = await signReplay(ctx.env, key);
+        const res = await ctx.env.app.fetch(route.method, path, {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: ctx.req.header('Authorization') || '',
+            'Idempotency-Key': key,
+            'X-Device-Id': deviceId,
+            'X-Sync-Replay': replaySig || '',
+          },
+          body: JSON.stringify(payload),
+          env: ctx.env,
+        });
+        const status = res.status;
+        // A web Response's body is a stream, not a string, so it has to be read.
+        const raw = await res.text().catch(() => '');
+        let parsed = null;
+        try { parsed = raw ? JSON.parse(raw) : null; } catch (e) { parsed = null; }
+        const replayed = res.headers && res.headers.get ? res.headers.get('Idempotency-Replayed') : null;
+        if (status >= 200 && status < 300) {
+          applied += 1;
+          results.operations.push({
+            clientId: key, type: kind, status: replayed === 'true' ? 'ALREADY_APPLIED' : 'APPLIED',
+            httpStatus: status,
+            message: (parsed && parsed.message) || 'Applied.',
+            result: parsed && (parsed.saleId || parsed.claimCode) ? {
+              saleId: parsed.saleId, receiptNo: parsed.receiptNo,
+              claimCode: parsed.claimCode || null, changeOwed: parsed.changeOwed || null,
+              claimExpiresAt: parsed.claimExpiresAt || null,
+            } : undefined,
+            warnings: (parsed && parsed.warnings) || [],
+          });
+        } else {
+          rejected += 1;
+          results.operations.push({
+            clientId: key, type: kind, status: 'REJECTED', httpStatus: status,
+            code: (parsed && parsed.code) || 'REJECTED',
+            message: (parsed && (parsed.message || parsed.error)) || `The server refused this ${kind.toLowerCase()} (HTTP ${status}).`,
+            // Whether the device should keep retrying. A 4xx is a decision the
+            // server made and will make again; retrying it forever fills the
+            // queue and hides the item a human needs to look at.
+            retryable: status >= 500,
+            problems: (parsed && parsed.problems) || [],
+          });
+        }
+      } catch (e) {
+        rejected += 1;
+        results.operations.push({
+          clientId: key, type: kind, status: 'ERROR', code: e.code || 'REPLAY_FAILED',
+          message: e.message || 'The operation could not be replayed.',
+          retryable: true,
+        });
+      }
+    }
+
+    // ---- 2. ROW MUTATIONS: LWW over the whitelist.
+    for (const m of mutations) {
+      const table = String(m.table || '').toLowerCase();
+      const spec = LWW_TABLES[table];
+      const rowId = m.id || m.row_id || (m.data && m.data.id);
+      if (!spec) {
+        results.mutations.push({ table, id: rowId || null, status: 'REJECTED', code: 'TABLE_NOT_SYNCABLE', message: `“${table}” cannot be written from a device. It has to go through its own endpoint so the rules around it actually run.` });
+        rejected += 1;
+        continue;
+      }
+      if (!rowId) {
+        results.mutations.push({ table, id: null, status: 'REJECTED', code: 'MISSING_ID', message: 'A row mutation needs its id.' });
+        rejected += 1;
+        continue;
+      }
+      const op = String(m.op || 'UPSERT').toUpperCase();
+      const clientUpdatedAt = m.client_updated_at || m.clientUpdatedAt || m.updated_at || null;
+      const baseUpdatedAt = m.base_updated_at || m.baseUpdatedAt || null;
+
+      const existing = await db.first(`SELECT * FROM ${table} WHERE ${spec.pk} = ? AND is_deleted = 0`, [String(rowId)]);
+
+      if (op === 'DELETE') {
+        if (!existing) { results.mutations.push({ table, id: rowId, status: 'SKIPPED', code: 'ALREADY_GONE', message: 'That row no longer exists.' }); continue; }
+        if (!await inScopeAsync(ctx.get('scope'), existing, db, spec)) {
+          results.mutations.push({ table, id: rowId, status: 'REJECTED', code: 'OUT_OF_SCOPE', message: 'That row belongs to another branch. It was left alone.' });
+          rejected += 1;
+          continue;
+        }
+        await db.run(`UPDATE ${table} SET is_deleted = 1, updated_at = datetime('now') WHERE ${spec.pk} = ?`, [String(rowId)]);
+        applied += 1;
+        results.mutations.push({ table, id: rowId, status: 'APPLIED', message: 'Removed.' });
+        continue;
+      }
+
+      const data = m.data || m.fields || {};
+      // Only whitelisted columns, and NEVER the scope columns. Taking branch_id
+      // from client data would let a device move a row into another branch, which
+      // is the tenant-isolation failure this whole module exists to avoid.
+      //
+      // The check runs over EVERY key the device sent, not just the whitelisted
+      // ones. Testing against the whitelist alone would let `branch_id` through
+      // unnoticed wherever it happened to be absent from that table's column
+      // list — a silence, not a refusal, and the row would be written anyway.
+      const sets = []; const params = []; const rejectedCols = [];
+      for (const col of Object.keys(data)) {
+        if (col !== spec.scopeColumn && col !== 'business_id') continue;
+        rejectedCols.push(col);
+      }
+      for (const col of spec.columns) {
+        if (data[col] === undefined) continue;
+        if (rejectedCols.includes(col)) continue;
+        sets.push(`${col} = ?`);
+        params.push(normaliseValue(data[col]));
+      }
+      if (rejectedCols.length) {
+        results.mutations.push({ table, id: rowId, status: 'REJECTED', code: 'SCOPE_COLUMN_FORBIDDEN', message: `${table}.${rejectedCols.join(', ')} cannot be set from a device — it decides who can see the row.` });
+        rejected += 1;
+        continue;
+      }
+      if (!sets.length) {
+        results.mutations.push({ table, id: rowId, status: 'SKIPPED', code: 'NO_SYNCABLE_FIELDS', message: 'None of the fields sent can be written from a device.' });
+        continue;
+      }
+
+      if (existing) {
+        // ---- TENANT CHECK BEFORE WRITE. This is the guard that a blind
+        // force-scope would skip: the row is verified to be in the caller's scope
+        // and left untouched if it is not, rather than being reparented into it.
+        if (!await inScopeAsync(ctx.get('scope'), existing, db, spec)) {
+          results.mutations.push({ table, id: rowId, status: 'REJECTED', code: 'OUT_OF_SCOPE', message: 'That row belongs to another branch, so it was left exactly as it was. It has NOT been moved into your branch.' });
+          rejected += 1;
+          continue;
+        }
+        // ---- LWW. The server row wins when it changed after the device's base
+        // version, and the device's version is CAPTURED rather than dropped.
+        const serverUpdatedAt = existing.updated_at || null;
+        const deviceLost = baseUpdatedAt && serverUpdatedAt && String(serverUpdatedAt) > String(baseUpdatedAt);
+        if (deviceLost) {
+          conflicts += 1;
+          const conflictId = newId();
+          const conflictBranch = branch ? String(branch.id) : (existing.branch_id || null);
+          await db.run(`INSERT INTO sync_conflicts (
+              id, table_name, row_id, branch_id, device_id, losing_version_json, winning_version_json, detected_at)
+            VALUES (?,?,?,?,?,?,?, datetime('now'))`, [
+            conflictId, table, String(rowId), conflictBranch, deviceId,
+            JSON.stringify({ data, clientUpdatedAt, baseUpdatedAt }),
+            JSON.stringify(existing),
+          ]);
+          try {
+            await saleIssues.noteConflict(db, { conflictId, table, rowId, branchId: conflictBranch });
+          } catch (e) {
+            if (!saleIssues.missingTable(e)) console.error('[sale-issues]', e && e.message);
+          }
+          results.mutations.push({
+            table, id: rowId, status: 'CONFLICT', code: 'SERVER_WON',
+            message: `That row was changed on the server after this device last saw it, so the server's version was kept. The device's version is stored under Sync → Conflicts. Refetch the row.`,
+            serverVersion: existing,
+          });
+          continue;
+        }
+        sets.push("updated_at = datetime('now')");
+        params.push(String(rowId));
+        await db.run(`UPDATE ${table} SET ${sets.join(', ')} WHERE ${spec.pk} = ? AND is_deleted = 0`, params);
+        applied += 1;
+        results.mutations.push({ table, id: rowId, status: 'APPLIED', message: 'Updated.' });
+      } else {
+        // A new row is scoped to the SYNCING branch on insert, which is correct:
+        // the device created it, so it belongs where the device is. With no branch
+        // there is nowhere honest to put it, so this one mutation is refused and
+        // the batch carries on.
+        if (!branch) {
+          results.mutations.push({ table, id: rowId, status: 'REJECTED', code: 'BRANCH_REQUIRED', message: 'A device creates a row in the branch it is working in, and this push named none. Send branch_id with the push, or sign in to a branch account.' });
+          rejected += 1;
+          continue;
+        }
+        const cols = [spec.pk, ...sets.map((x) => x.split(' = ')[0])];
+        const vals = [String(rowId), ...params];
+        if (spec.scopeColumn && !cols.includes(spec.scopeColumn)) { cols.push(spec.scopeColumn); vals.push(String(branch.id)); }
+        if (!cols.includes('business_id') && table !== 'notifications') { cols.push('business_id'); vals.push(String(business.id)); }
+        if (!cols.includes('created_at')) { cols.push('created_at'); vals.push(null); }
+        if (!cols.includes('updated_at')) { cols.push('updated_at'); vals.push(null); }
+        if (!cols.includes('is_deleted')) { cols.push('is_deleted'); vals.push(0); }
+        const finalCols = []; const finalVals = [];
+        for (let i = 0; i < cols.length; i += 1) {
+          if (cols[i] === 'created_at' || cols[i] === 'updated_at') { finalCols.push(cols[i]); finalVals.push({ sql: "datetime('now')" }); }
+          else { finalCols.push(cols[i]); finalVals.push(vals[i]); }
+        }
+        const placeholders = finalVals.map((v) => (v && v.sql ? v.sql : '?')).join(',');
+        const bind = finalVals.filter((v) => !(v && v.sql));
+        try {
+          await db.run(`INSERT INTO ${table} (${finalCols.join(', ')}) VALUES (${placeholders})`, bind);
+          applied += 1;
+          results.mutations.push({ table, id: rowId, status: 'APPLIED', message: 'Created.' });
+        } catch (e) {
+          rejected += 1;
+          results.mutations.push({ table, id: rowId, status: 'REJECTED', code: e.code || 'INSERT_FAILED', message: e.message || 'The row could not be created.' });
+        }
+      }
+    }
+
+    // ---- sync bookkeeping. Written per table so the device can show what moved.
+    const touched = {};
+    for (const r of results.mutations) touched[r.table] = (touched[r.table] || 0) + 1;
+    const branchKey = branch ? String(branch.id) : null;
+    await db.transaction(async (tx) => {
+      for (const [table, count] of Object.entries(touched)) {
+        tx.queue(`INSERT INTO sync_change_log (id, branch_id, device_id, direction, table_name, row_count, status, error_message, synced_at)
+            VALUES (?,?,?,?,?,?, 'SUCCESS', NULL, datetime('now'))`, [newId(), branchKey, deviceId, 'PUSH', table, count]);
+      }
+      if (operations.length) {
+        tx.queue(`INSERT INTO sync_change_log (id, branch_id, device_id, direction, table_name, row_count, status, error_message, synced_at)
+            VALUES (?,?,?,?, 'OPERATIONS', ?, ?, ?, datetime('now'))`, [
+          newId(), branchKey, deviceId, 'PUSH', operations.length,
+          // 'SUCCESS' — not 'OK'. The column is CHECKed against
+          // ('SUCCESS','PARTIAL','FAILED'), so every push in which nothing was
+          // refused violated the constraint, the whole request answered 400, and
+          // the device never learned that its queued work had been applied: the
+          // outbox stayed full and re-sent itself for ever. The happy path was the
+          // only path that broke, which is why nobody saw it.
+          rejected > 0 ? 'PARTIAL' : 'SUCCESS',
+          rejected > 0 ? `${rejected} of ${operations.length} operation(s) refused` : null,
+        ]);
+      }
+      // ONE ROW PER (BRANCH, DEVICE) — migration 0006. The conflict target is the
+      // table's own primary key, which is now the pair. Before 0006 it was `branch_id`
+      // alone and `device_id` was never updated, so this row described the first device
+      // that ever synced at the branch and no other phone could appear.
+      //
+      // Written only when we know WHICH branch synced: a push that named no branch has no
+      // honest row to write, and inventing one would attribute this device's queue to a
+      // shop it is not standing in.
+      if (branchKey) {
+        tx.queue(`INSERT INTO branch_sync_status (branch_id, device_id, app_version, last_heartbeat_at, last_push_at,
+              pending_push_count, last_sync_error, updated_at)
+            VALUES (?,?,?, datetime('now'), datetime('now'), ?, ?, datetime('now'))
+            ON CONFLICT(branch_id, device_id) DO UPDATE SET
+              app_version = excluded.app_version,
+              last_push_at = datetime('now'),
+              last_heartbeat_at = datetime('now'),
+              pending_push_count = excluded.pending_push_count,
+              last_sync_error = excluded.last_sync_error,
+              updated_at = datetime('now')`, [
+          branchKey, deviceId, appVersion,
+          Number(body.pending_push_count) || 0,
+          rejected > 0 ? `${rejected} item(s) refused at ${watNow()}` : null,
+        ]);
+      }
+    });
+
+    if (rejected > 0 || conflicts > 0) {
+      // THE BRANCH IS NULL HERE AND THAT IS THE NORMAL CASE FOR A BIGGER SHOP.
+      //
+      // `branch` is only resolved up front when the caller covers exactly one branch: an
+      // owner with two shops, or a deployment administrator, names no branch and the push
+      // proceeds without one (the comments at the top of this route say so, and are right —
+      // requiring one would fail a cashier's whole day over one malformed item).
+      //
+      // `branch.id` therefore threw `TypeError: Cannot read properties of null (reading
+      // 'id')` — on the ONE branch of the code that only runs when something was refused or
+      // conflicted. So the answer to "part of my queue was rejected" was a 500 with no
+      // per-item detail, on every multi-branch deployment, and 500 is the one answer an
+      // offline queue cannot act on: it cannot tell a bad item from a bad server, so it
+      // retries the whole batch forever.
+      //
+      // Found by test/audit/audit.sync.js (Stage T4) — the first thing in the suite to send
+      // a push with a rejected item in it from a deployment that has two branches.
+      await recordFromCtx(ctx, {
+        action: 'SYNC_PUSH_PARTIAL', entityType: 'SYNC', entityId: deviceId,
+        branchId: branch ? String(branch.id) : null,
+        businessId: business ? String(business.id) : null,
+        after: { deviceId, appVersion, operations: operations.length, mutations: mutations.length, applied, rejected, conflicts, quarantined, clockSkewMinutes },
+      });
+    }
+
+    ctx.json({
+      ok: rejected === 0,
+      applied, rejected, conflicts, quarantined,
+      clockSkewMinutes,
+      results,
+      // The cursor the device should use for its next pull. Taken from the
+      // server clock AFTER the push, so the device's own writes come back to it
+      // on the next pull rather than being missed.
+      cursor: utcNow(),
+      message: rejected === 0 && conflicts === 0 && quarantined === 0
+        ? `${applied} item(s) synced from ${deviceId}.`
+        : `${applied} applied, ${rejected} refused${conflicts ? `, ${conflicts} conflict(s)` : ''}${quarantined ? `, ${quarantined} quarantined after a cleanup` : ''}. Each item is listed with its reason — the refused and quarantined ones will not apply on retry, so they need a person.`,
+    }, rejected === 0 ? 200 : 207);
+  });
+
+  // -------------------------------------------------------------------
+  // PULL
+  // -------------------------------------------------------------------
+  /**
+   * Pull everything that changed since the device's cursor.
+   *
+   * This is what makes the offline mirror usable: a device that has the
+   * catalogue, prices, customer list and settings can price a sale and check a
+   * credit limit with no network. It is scoped to the caller's branch and
+   * business, so a device can never pull another branch's book.
+   *
+   * `since` is compared against `updated_at` (UTC). A device with a skewed clock
+   * still gets correct data, because the cursor it is given back is a SERVER
+   * timestamp — the device never supplies its own idea of "now" as the cursor.
+   */
+  app.post(`${base}/sync/pull`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const body = await ctx.req.json().catch(() => ({}));
+    // Optional, for the same reason as `push`: an administrator covers every
+    // branch, so naming one would make a first pull on a fresh install return a
+    // sixth of the catalogue. `scope` is what decides visibility below; the
+    // branch only NARROWS it.
+    const branch = await resolveBranch(db, ctx, { required: false });
+    // `biz` is null when the caller reaches every business and named none: the pull
+    // then covers them all, exactly as the branch does above for an administrator
+    // ("naming one would make a first pull on a fresh install return a sixth of the
+    // catalogue"). A device pinned to a branch still gets that branch.
+    const biz = await readBusinessId(db, ctx, { branch });
+    const scope = ctx.get('scope');
+    const deviceId = strField(body.device_id || body.deviceId || ctx.req.queryParam('device_id') || ctx.req.header('X-Device-Id'), { field: 'Device', maxLength: 120 });
+    const sinceRaw = strField(body.since || ctx.req.queryParam('since'), { field: 'Since', maxLength: 40 });
+    // Devices already in the field stored an ISO cursor. Normalise it to the
+    // same `YYYY-MM-DD HH:MM:SS` form as `updated_at` before comparing, or the
+    // space-versus-T sort drops every same-day change — including a price that
+    // was just corrected. An unreadable cursor pulls everything rather than
+    // returning an empty delta that looks like "nothing changed".
+    const since = sinceRaw ? toUtcSql(sinceRaw) : null;
+    // A table named here ignores the cursor for this request only. Used when a
+    // device is pulling a table it has never held, so a cursor from before that
+    // table existed does not hide the rows already on the shelf.
+    const fullTables = new Set(Array.isArray(body.full_tables) ? body.full_tables.map((t) => String(t).toLowerCase()) : []);
+    const includeAllBranches = body.include_all_branches === true || body.include_all_branches === 1 || body.include_all_branches === '1';
+    const includeAllBusinesses = includeAllBranches || body.include_all_businesses === true || body.include_all_businesses === 1 || body.include_all_businesses === '1';
+
+    // A first sync has no cursor and must get everything; a later sync gets only
+    // what changed. The cap on a full sync matters — a 78-product catalogue with
+    // variants, units and barcodes is a few hundred rows, but an unbounded pull
+    // on a slow connection is how a device gives up mid-download and ends up
+    // with a half-populated mirror.
+    // The Nigerian-market migration plants 4,828 shared goods. A cap of 5,000
+    // would cut the tail of that list once a shop also has its own catalogue.
+    const fullSync = !since;
+    // A named full table must not share the incremental cap. A till asking
+    // for every sale, while the rest of the request is a cursor, used to
+    // stop at 2,000 and then treat that slice as the whole book.
+    const fullLimit = Number(body.limit) || 12000;
+    const deltaLimit = Number(body.limit) || 2000;
+    // One response of every product, variant and barcode is what the Worker
+    // and the till proxy cut off. The till then said the shop did not finish
+    // sending the catalogue. A page is a slice the shop can finish. `after`
+    // is the last id already stored, so the next page does not repeat it and
+    // does not skip a row that arrived between pages.
+    const pageSizeRaw = Number(body.page_size || body.pageSize);
+    const paging = Number.isFinite(pageSizeRaw) && pageSizeRaw > 0;
+    const pageSize = paging ? Math.min(400, Math.max(1, Math.floor(pageSizeRaw))) : 0;
+    const afterMap = body.after && typeof body.after === 'object' && !Array.isArray(body.after) ? body.after : {};
+    const afterAtMap = body.after_at && typeof body.after_at === 'object' && !Array.isArray(body.after_at) ? body.after_at : {};
+    // A till that already holds a cursor asks for a watermark. The id walk
+    // stays for a first copy and for a till that has not asked, so a shop
+    // deploy does not skip rows on an older screen.
+    const wantWatermark = body.watermark === true || body.watermark === 1 || body.watermark === '1';
+    // One row per mirrored table. A write bumps it. An idle till that already
+    // holds these numbers does not open the catalogue. A till that omits them
+    // keeps the watermark page, so an older screen is not skipped.
+    const askedRevisions = body.revisions && typeof body.revisions === 'object' && !Array.isArray(body.revisions)
+      ? body.revisions
+      : null;
+    let revisionMap = null;
+    try {
+      const revRows = await db.all('SELECT table_name, revision FROM sync_revisions');
+      revisionMap = new Map((revRows || []).map((row) => [String(row.table_name), Number(row.revision) || 0]));
+    } catch (e) {
+      revisionMap = null;
+    }
+
+    const requested = Array.isArray(body.tables) && body.tables.length
+      ? body.tables.map((t) => String(t).toLowerCase())
+      : ['businesses', 'branches', 'users', 'customer_classes', 'customers', 'product_categories', 'products', 'product_units', 'product_variants', 'product_barcodes', 'price_lists', 'price_list_items', 'product_price_overrides', 'suppliers', 'stock_batches', 'purchase_orders', 'purchase_order_items', 'deposits', 'instalment_plans', 'delivery_jobs', 'client_settings', 'branch_safe_ledger', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'customer_bills', 'change_owed', 'till_sessions'];
+
+    const out = {};
+    let totalRows = 0;
+    // One look at the shelf for this request. An empty shelf must not open
+    // the product table, the market list, or the Greenbook.
+    let stockGate = null;
+    for (const table of requested) {
+      // Only tables that exist and are safe to mirror. A device must not be able
+      // to ask for `gl_journal_lines` or `audit_log` and receive them.
+      if (!PULLABLE[table]) { out[table] = { error: 'not_syncable', rows: [] }; continue; }
+      // Read once, below, and redact it. The loop used to read it as well.
+      if (table === 'client_settings') continue;
+      // A named full read is the rare reconcile. Do not skip that. A matching
+      // revision means this table has not been written since the till stored
+      // the number, so opening it would scan rows the till already has.
+      if (revisionMap && askedRevisions && wantWatermark && since && !fullTables.has(table) && askedRevisions[table] != null && revisionMap.has(table)) {
+        const current = revisionMap.get(table);
+        if (Number(askedRevisions[table]) === current) {
+          out[table] = { rows: [], count: 0, truncated: false, unchanged: true };
+          continue;
+        }
+      }
+      const spec = PULLABLE[table];
+      if (spec.onStock) {
+        if (!stockGate) {
+          const held = stockScope(scope, { includeAllBusinesses, includeAllBranches, biz, branch });
+          const hit = await db.first(
+            `SELECT 1 AS ok FROM stock_batches WHERE ${held.where.join(' AND ')} LIMIT 1`,
+            held.params,
+          );
+          stockGate = { any: Boolean(hit), held };
+        }
+        if (!stockGate.any) {
+          out[table] = { rows: [], count: 0, truncated: false };
+          continue;
+        }
+      }
+      const where = []; const params = [];
+      const cursorColumn = /^[a-z_]+$/.test(String(spec.cursorColumn || '')) ? spec.cursorColumn : 'updated_at';
+      const useWatermark = Boolean(wantWatermark && since && !fullTables.has(table));
+      // A delta includes a soft-deleted row so the till can drop it without
+      // reading the shelf again. A first copy still skips those rows.
+      if (spec.softDelete !== false && !useWatermark) where.push('is_deleted = 0');
+      if (spec.parent && /^[a-z_]+$/.test(spec.parent.table) && /^[a-z_]+$/.test(spec.parent.column)) {
+        const parentSpec = PULLABLE[spec.parent.table] || {};
+        const parentWhere = parentSpec.softDelete === false ? ['1 = 1'] : ['is_deleted = 0'];
+        const parentParams = [];
+        if (parentSpec.businessScoped !== false && includeAllBusinesses && scope.allBusinesses) {
+          // the parent already covers every business this person reaches
+        } else if (parentSpec.businessScoped !== false && includeAllBusinesses && scope.businessIds && scope.businessIds.size) {
+          const ids = [...scope.businessIds];
+          parentWhere.push(`(business_id IS NULL OR business_id IN (${ids.map(() => '?').join(',')}))`);
+          parentParams.push(...ids);
+        } else if (parentSpec.businessScoped !== false && biz) {
+          parentWhere.push('(business_id = ? OR business_id IS NULL)');
+          parentParams.push(biz);
+        }
+        if (parentSpec.branchScoped && !scope.allBranches && scope.branchIds) {
+          const ids = [...scope.branchIds];
+          parentWhere.push(`(branch_id IS NULL OR branch_id IN (${ids.map(() => '?').join(',')}))`);
+          parentParams.push(...ids);
+        } else if (parentSpec.branchScoped && branch && !includeAllBranches) {
+          parentWhere.push('(branch_id IS NULL OR branch_id = ?)');
+          parentParams.push(String(branch.id));
+        }
+        where.push(`${spec.parent.column} IN (SELECT id FROM ${spec.parent.table} WHERE ${parentWhere.join(' AND ')})`);
+        params.push(...parentParams);
+      }
+      // A full mirror must not be cut to the shop the shell happened to stand
+      // in. After a browser clear that shop is the first branch, and an offline
+      // login then restored only that branch. A pinned cashier is still limited
+      // by scope below.
+      if (spec.businessScoped !== false && includeAllBusinesses && scope.allBusinesses) {
+        // every business this person reaches
+      } else if (spec.businessScoped !== false && includeAllBusinesses && scope.businessIds && scope.businessIds.size) {
+        const ids = [...scope.businessIds];
+        where.push(`(business_id IS NULL OR business_id IN (${ids.map(() => '?').join(',')}))`);
+        params.push(...ids);
+      } else if (spec.businessScoped !== false && biz) {
+        where.push('(business_id = ? OR business_id IS NULL)');
+        params.push(biz);
+      }
+      if (spec.branchScoped && !scope.allBranches && scope.branchIds) {
+        const ids = [...scope.branchIds];
+        where.push(`(branch_id IS NULL OR branch_id IN (${ids.map(() => '?').join(',')}))`);
+        params.push(...ids);
+      } else if (spec.branchScoped && branch && !includeAllBranches) {
+        // A named shop used to cut the mirror down to that shop. An owner who
+        // synced while standing in one business then lost the line in another
+        // had no shelf there. Scope still limits a pinned cashier.
+        where.push('(branch_id IS NULL OR branch_id = ?)'); params.push(String(branch.id));
+      }
+      // The shared market list has no business_id. A shop search still reads it
+      // on the server. The till saves the shelf, not those 4,828 names and units.
+      const shelf = deviceShelfLimit(spec, { includeAllBusinesses, scope, biz });
+      for (const piece of shelf.where) where.push(piece);
+      params.push(...shelf.params);
+      if (spec.onStock && stockGate && stockGate.any) {
+        const column = table === 'products' ? 'id' : 'product_id';
+        where.push(`${column} IN (SELECT product_id FROM stock_batches WHERE ${stockGate.held.where.join(' AND ')})`);
+        params.push(...stockGate.held.params);
+      }
+      const afterRaw = paging ? afterMap[table] : null;
+      const afterId = afterRaw == null ? '' : String(afterRaw).trim();
+      const afterIdOk = Boolean(paging && afterId && afterId.length <= 80 && /^[A-Za-z0-9_-]+$/.test(afterId));
+      const afterAtRaw = paging ? afterAtMap[table] : null;
+      const afterAt = afterAtRaw ? toUtcSql(String(afterAtRaw)) : null;
+      let order = paging ? 'id' : (spec.orderBy || 'updated_at DESC, id');
+      if (useWatermark) {
+        const page = watermarkPage({
+          since,
+          afterAt: afterIdOk ? afterAt : null,
+          afterId: afterIdOk ? afterId : null,
+          column: cursorColumn,
+        });
+        if (page) {
+          where.push(page.sql);
+          params.push(...page.params);
+          order = page.order;
+        } else {
+          where.push(`${cursorColumn} > ?`);
+          params.push(since);
+        }
+      } else if (since && !fullTables.has(table)) {
+        where.push(`${cursorColumn} > ?`);
+        params.push(since);
+      }
+      if (!useWatermark && afterIdOk) {
+        where.push('id > ?');
+        params.push(afterId);
+      }
+      let cols = spec.columns ? spec.columns.join(', ') : '*';
+      if (useWatermark && spec.columns && spec.softDelete !== false && !spec.columns.includes('is_deleted')) {
+        cols = spec.columns.concat(['is_deleted']).join(', ');
+      }
+      if (useWatermark && spec.columns && !spec.columns.includes(cursorColumn)) {
+        cols = `${cols}, ${cursorColumn}`;
+      }
+      const tableLimit = paging ? pageSize : ((fullSync || fullTables.has(table)) ? fullLimit : deltaLimit);
+      // A watermark page walks (updated_at, id). An id walk cannot use that
+      // index, so it scans the table and reads rows the till already stored.
+      // Name order plus an id cursor skips and repeats. That stays off.
+      if (!where.length) where.push('1 = 1');
+      let rows;
+      try {
+        rows = await db.all(`SELECT ${cols} FROM ${table} WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ?`, [...params, tableLimit]);
+      } catch (e) {
+        out[table] = { error: e.message, rows: [] };
+        continue;
+      }
+      if (table === 'stock_batches' && rows.length) rows = await attachStockProductNames(db, rows);
+      out[table] = { rows, count: rows.length, truncated: rows.length >= tableLimit };
+      totalRows += rows.length;
+    }
+
+    // client_settings is a single global row and has no business_id, so it is
+    // fetched separately: it carries the feature flags the offline UI needs to
+    // know which screens to show.
+    if (requested.includes('client_settings')) {
+      const settings = await db.first('SELECT * FROM client_settings LIMIT 1');
+      if (settings) {
+        out.client_settings = { rows: [redactSettings(settings)], count: 1, truncated: false };
+      }
+    }
+
+    const next = {};
+    const nextAt = {};
+    if (paging) {
+      for (const [name, item] of Object.entries(out)) {
+        if (!item || !item.truncated || !Array.isArray(item.rows) || !item.rows.length) continue;
+        const last = item.rows[item.rows.length - 1];
+        if (last && last.id != null) next[name] = String(last.id);
+        if (wantWatermark && last) {
+          const spec = PULLABLE[name] || {};
+          const stampCol = /^[a-z_]+$/.test(String(spec.cursorColumn || '')) ? spec.cursorColumn : 'updated_at';
+          const stamp = last[stampCol] || last.updated_at || last.created_at;
+          if (stamp) nextAt[name] = String(stamp);
+        }
+      }
+    }
+
+    const cursor = utcNow();
+    // Only a pull that actually belongs to a branch updates that branch's
+    // heartbeat row. A branchless pull would otherwise claim a shop's status.
+    // A heartbeat is a write. An idle till used to write one on every
+    // three-minute pull. Fifteen minutes is still a live till. A pull that
+    // has no branch does not claim one.
+    if (deviceId && branch) {
+      const beat = await db.first(
+        'SELECT last_heartbeat_at FROM branch_sync_status WHERE branch_id = ? AND device_id = ?',
+        [String(branch.id), deviceId],
+      );
+      if (!beat || !beat.last_heartbeat_at || minutesSince(beat.last_heartbeat_at) >= 15) {
+        await db.run(`INSERT INTO branch_sync_status (branch_id, device_id, app_version, last_pull_at, last_heartbeat_at, updated_at)
+            VALUES (?,?,?, datetime('now'), datetime('now'), datetime('now'))
+            ON CONFLICT(branch_id, device_id) DO UPDATE SET
+              last_pull_at = datetime('now'), last_heartbeat_at = datetime('now'),
+              app_version = COALESCE(excluded.app_version, app_version), updated_at = datetime('now')`,
+        [String(branch.id), deviceId, strField(body.app_version, { field: 'App version', maxLength: 40 })]);
+      }
+    }
+    const revisionPayload = revisionMap ? Object.fromEntries(revisionMap) : undefined;
+
+    ctx.json({
+      ok: true, cursor, since: since || null, fullSync,
+      tables: out,
+      totalRows,
+      message: fullSync
+        ? `Full sync: ${totalRows} row(s) across ${Object.keys(out).filter((k) => out[k].count).length} table(s). This is everything this device is allowed to see.`
+        : `${totalRows} row(s) changed since ${since}.`,
+      // Told to the device explicitly, because a truncated table means the
+      // mirror is incomplete and pricing against it could be wrong.
+      truncatedTables: Object.entries(out).filter(([, v]) => v.truncated).map(([k]) => k),
+      next,
+      next_at: wantWatermark ? nextAt : undefined,
+      // The numbers the till stores. Absent means this shop has no revision
+      // table yet. An older till ignores the field.
+      revisions: revisionPayload,
+      // Told so the till can drop a tombstone and stop re-reading the shelf.
+      // Absent means this shop did not send them. An older till ignores it.
+      watermark: wantWatermark ? true : undefined,
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // STATUS / CONFLICTS
+  // -------------------------------------------------------------------
+  app.get(`${base}/sync/status`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const scope = ctx.get('scope');
+    const where = ['1 = 1']; const params = [];
+    if (!scope.allBranches && scope.branchIds) {
+      const ids = [...scope.branchIds]; where.push(`branch_id IN (${ids.map(() => '?').join(',')})`); params.push(...ids);
+    }
+    const devices = await db.all(`SELECT ss.*, b.name AS branch_name FROM branch_sync_status ss
+        LEFT JOIN branches b ON b.id = ss.branch_id
+        WHERE ${where.join(' AND ')} ORDER BY ss.last_heartbeat_at DESC LIMIT 200`, params);
+    const recent = await db.all(`SELECT sc.*, b.name AS branch_name FROM sync_change_log sc
+        LEFT JOIN branches b ON b.id = sc.branch_id
+        WHERE ${where.join(' AND ').replace(/branch_id/g, 'sc.branch_id')}
+        ORDER BY sc.synced_at DESC LIMIT 50`, params);
+    const openConflicts = await db.scalar(`SELECT COUNT(*) FROM sync_conflicts sc WHERE sc.reviewed_at IS NULL
+        ${scope.allBranches ? '' : `AND (sc.branch_id IN (${[...scope.branchIds].map(() => '?').join(',')}) OR sc.branch_id IS NULL)`}`,
+    scope.allBranches ? [] : [...scope.branchIds]);
+    ctx.json({
+      ok: true, devices, recentChanges: recent,
+      openConflicts: Number(openConflicts) || 0,
+      summary: {
+        devices: devices.length,
+        stale: devices.filter((d) => d.last_heartbeat_at && minutesSince(d.last_heartbeat_at) > 1440).length,
+        withErrors: devices.filter((d) => d.last_sync_error).length,
+        pendingPush: devices.reduce((a, d) => a + Number(d.pending_push_count || 0), 0),
+      },
+    });
+  });
+
+  app.get(`${base}/sync/conflicts`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const scope = ctx.get('scope');
+    const { limit, offset } = pagination(ctx);
+    const where = ['1 = 1']; const params = [];
+    if (!scope.allBranches && scope.branchIds) {
+      const ids = [...scope.branchIds]; where.push(`(c.branch_id IS NULL OR c.branch_id IN (${ids.map(() => '?').join(',')}))`); params.push(...ids);
+    }
+    if (!boolField(ctx.req.queryParam('include_resolved'))) where.push('c.reviewed_at IS NULL');
+    const whereSql = where.join(' AND ');
+    const rows = await db.all(`SELECT c.*, b.name AS branch_name, u.full_name AS reviewer_name
+        FROM sync_conflicts c LEFT JOIN branches b ON b.id = c.branch_id
+        LEFT JOIN users u ON u.id = c.reviewed_by
+        WHERE ${whereSql} ORDER BY c.detected_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const total = await db.scalar(`SELECT COUNT(*) FROM sync_conflicts c WHERE ${whereSql}`, params);
+    ctx.json({
+      ...listResponse(rows.map((r) => ({
+        ...r,
+        // Parsed for the UI so it can show a side-by-side diff instead of two
+        // blobs of JSON. A conflict nobody can read is a conflict nobody resolves.
+        losing: safeParse(r.losing_version_json),
+        winning: safeParse(r.winning_version_json),
+      })), { limit, offset }, total),
+    });
+  });
+
+  /**
+   * Resolve a conflict.
+   *
+   * Resolving does NOT re-apply the losing version automatically. The manager
+   * looks at both, decides, and either accepts the server's version (closing the
+   * conflict) or re-queues the device's version as a fresh mutation with a new
+   * base — which then goes through the normal scope and LWW checks. Silently
+   * overwriting the server row would recreate exactly the problem the conflict
+   * record exists to surface.
+   */
+  app.post(`${base}/sync/conflicts/:id/resolve`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager or above can resolve a sync conflict. It decides which of two people\'s work is kept.', { status: 403, code: 'ROLE_REQUIRED' });
+    const id = String(ctx.req.param('id'));
+    const body = await ctx.req.json();
+    const conflict = await db.first('SELECT * FROM sync_conflicts WHERE id = ?', [id]);
+    if (!conflict) throw new HttpError('That conflict does not exist.', { status: 404, code: 'CONFLICT_NOT_FOUND' });
+    if (conflict.reviewed_at) throw new HttpError(`That conflict was already resolved on ${conflict.reviewed_at}.`, { status: 409, code: 'ALREADY_RESOLVED' });
+    const resolution = strField(body.resolution, { field: 'Resolution', maxLength: 500, required: true });
+    if (resolution.length < 6) throw new HttpError('Say which version was kept and why. Two people edited the same row and one of them is going to lose their work.', { status: 400, code: 'RESOLUTION_REQUIRED' });
+    const decision = String(body.decision || 'SERVER_KEPT').toUpperCase();
+    if (!['SERVER_KEPT', 'DEVICE_REQUEUED', 'MERGED'].includes(decision)) {
+      throw new HttpError(`“${decision}” is not a resolution. Use SERVER_KEPT, DEVICE_REQUEUED or MERGED.`, { status: 400, code: 'INVALID_DECISION' });
+    }
+    await db.run('UPDATE sync_conflicts SET reviewed_by = ?, reviewed_at = datetime(\'now\') WHERE id = ?', [String(user.id), id]);
+    await recordFromCtx(ctx, {
+      action: 'SYNC_CONFLICT_RESOLVED', entityType: 'SYNC_CONFLICT', entityId: id, branchId: conflict.branch_id,
+      before: { reviewed_at: null }, after: { decision, resolution, table: conflict.table_name, rowId: conflict.row_id },
+    });
+    ctx.json({
+      ok: true, decision,
+      message: decision === 'SERVER_KEPT'
+        ? `Conflict closed — the server's version of ${conflict.table_name} ${String(conflict.row_id).slice(0, 8)} stands. The device should refetch that row.`
+        : decision === 'DEVICE_REQUEUED'
+          ? `Conflict closed — the device's version should be re-queued as a fresh edit. It will go through the normal checks again rather than overwriting the server row.`
+          : `Conflict closed as merged. Record what was merged in the row itself.`,
+    });
+  });
+
+  /** A heartbeat, so "which devices are alive?" is answerable. */
+  app.post(`${base}/sync/heartbeat`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const body = await ctx.req.json().catch(() => ({}));
+    const branch = await resolveBranch(db, ctx);
+    const deviceId = strField(body.device_id || body.deviceId || ctx.req.header('X-Device-Id'), { field: 'Device', maxLength: 120 });
+    if (!deviceId) throw new HttpError('A heartbeat must say which device it is from.', { status: 400, code: 'DEVICE_ID_REQUIRED' });
+    // ONE ROW PER (BRANCH, DEVICE) — migration 0006. It used to conflict on `branch_id`
+    // alone and never write `device_id` on the update path, so the second phone in a branch
+    // was invisible in `/api/sync/status` and its pending count was attributed to whichever
+    // device synced there first. See the migration for the whole reasoning.
+    await db.run(`INSERT INTO branch_sync_status (branch_id, device_id, app_version, last_heartbeat_at, pending_push_count, updated_at)
+        VALUES (?,?,?, datetime('now'), ?, datetime('now'))
+        ON CONFLICT(branch_id, device_id) DO UPDATE SET
+          last_heartbeat_at = datetime('now'), app_version = COALESCE(excluded.app_version, app_version),
+          pending_push_count = excluded.pending_push_count, updated_at = datetime('now')`,
+    [String(branch.id), deviceId, strField(body.app_version, { field: 'App version', maxLength: 40 }), Number(body.pending_push_count) || 0]);
+    ctx.json({
+      ok: true,
+      serverTime: watNow(), serverDate: watToday(),
+      // The server's clock is returned so the device can measure its own skew
+      // and warn the user, rather than silently queueing sales with future
+      // timestamps that the engine will then refuse.
+      serverEpoch: Date.now(),
+    });
+  });
+}
+
+/**
+ * Tables a device may PULL, and how each is scoped.
+ *
+ * `businessScoped` and `branchScoped` are applied as filters, never as
+ * permissions: a row with a NULL branch is shared (the catalogue is the same
+ * across branches) and must stay visible, while a row WITH a branch is visible
+ * only inside it.
+ */
+function stockScope(scope, { includeAllBusinesses, includeAllBranches, biz, branch } = {}) {
+  const where = ['is_deleted = 0', 'quantity > 0'];
+  const params = [];
+  const everyBusiness = Boolean(includeAllBusinesses && scope && scope.allBusinesses);
+  if (!everyBusiness) {
+    const ids = includeAllBusinesses && scope && scope.businessIds && scope.businessIds.size
+      ? [...scope.businessIds].map(String)
+      : null;
+    if (ids && ids.length) {
+      where.push(`business_id IN (${ids.map(() => '?').join(',')})`);
+      params.push(...ids);
+    } else if (biz) {
+      where.push('business_id = ?');
+      params.push(String(biz));
+    }
+  }
+  if (scope && !scope.allBranches && scope.branchIds && scope.branchIds.size) {
+    const ids = [...scope.branchIds].map(String);
+    where.push(`branch_id IN (${ids.map(() => '?').join(',')})`);
+    params.push(...ids);
+  } else if (branch && branch.id && !includeAllBranches) {
+    where.push('branch_id = ?');
+    params.push(String(branch.id));
+  }
+  return { where, params };
+}
+
+function deviceShelfLimit(spec, { includeAllBusinesses, scope, biz } = {}) {
+  if (!spec || (!spec.shopShelf && !spec.viaProduct)) return { where: [], params: [] };
+  const every = Boolean(includeAllBusinesses && scope && scope.allBusinesses);
+  let scopeSql = '';
+  const scopeParams = [];
+  if (!every) {
+    const ids = includeAllBusinesses && scope && scope.businessIds && scope.businessIds.size
+      ? [...scope.businessIds].map(String)
+      : null;
+    if (ids && ids.length) {
+      scopeSql = `business_id IN (${ids.map(() => '?').join(',')})`;
+      scopeParams.push(...ids);
+    } else if (biz) {
+      scopeSql = 'business_id = ?';
+      scopeParams.push(String(biz));
+    }
+  }
+  const where = [];
+  const params = [];
+  if (spec.shopShelf) {
+    where.push(scopeSql ? `business_id IS NOT NULL AND ${scopeSql}` : 'business_id IS NOT NULL');
+    params.push(...scopeParams);
+  }
+  if (spec.viaProduct && !spec.onStock) {
+    const inner = ['business_id IS NOT NULL', 'is_deleted = 0'];
+    if (scopeSql) inner.push(scopeSql);
+    where.push(`product_id IN (SELECT id FROM products WHERE ${inner.join(' AND ')})`);
+    params.push(...scopeParams);
+  }
+  return { where, params };
+}
+
+const PULLABLE = {
+  businesses: { businessScoped: false, branchScoped: false, orderBy: 'name' },
+  branches: { businessScoped: true, branchScoped: false, orderBy: 'name' },
+  users: {
+    businessScoped: true, branchScoped: false, orderBy: 'full_name',
+    // The PIN hash is never mirrored to a device. An offline copy of the
+    // credential database is a copy that can be lifted off a lost phone, and
+    // there is no offline operation that needs it — authentication is always
+    // against the server or against a locally cached session.
+    columns: ['id', 'business_id', 'branch_id', 'full_name', 'username', 'role', 'job_title', 'email', 'phone', 'commission_rate_pct', 'is_active', 'updated_at'],
+  },
+  customer_classes: { businessScoped: true, branchScoped: false, orderBy: 'name' },
+  customers: { businessScoped: true, branchScoped: true, orderBy: 'name' },
+  product_categories: { businessScoped: true, branchScoped: false, orderBy: 'sort_order, name' },
+  // shopShelf: the shared market list has no business. It stays on the server
+  // for a search. It is not the shelf, and a till must not save those 4,828 names.
+  // onStock: the Greenbook and the shop catalogue stay on the server. A till
+  // saves a product only when a batch of it is on hand.
+  products: { businessScoped: true, branchScoped: false, orderBy: 'name', shopShelf: true, onStock: true },
+  product_units: { businessScoped: false, branchScoped: false, orderBy: 'quantity_in_base', viaProduct: true, onStock: true },
+  product_variants: { businessScoped: false, branchScoped: false, orderBy: 'name', viaProduct: true, onStock: true },
+  product_barcodes: { businessScoped: false, branchScoped: false, orderBy: 'barcode', viaProduct: true, onStock: true },
+  price_lists: { businessScoped: true, branchScoped: false, orderBy: 'priority, name' },
+  price_list_items: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true, onStock: true },
+  product_price_overrides: { businessScoped: false, branchScoped: true, orderBy: 'product_id', onStock: true },
+  suppliers: { businessScoped: true, branchScoped: false, orderBy: 'name' },
+  stock_batches: { businessScoped: true, branchScoped: true, orderBy: 'product_id, batch_no' },
+  branch_compliance_records: { businessScoped: false, branchScoped: true, orderBy: 'record_type' },
+  // The safe is cash the shop holds outside the drawer. A pinned cashier is
+  // limited by branch scope. Without this table the till showed an open drawer
+  // and an empty safe after the line dropped.
+  branch_safe_ledger: { businessScoped: true, branchScoped: true, orderBy: 'created_at DESC' },
+  purchase_orders: { businessScoped: true, branchScoped: true, orderBy: 'ordered_at' },
+  deposits: { businessScoped: true, branchScoped: true, orderBy: 'expires_at' },
+  instalment_plans: { businessScoped: true, branchScoped: true, orderBy: 'next_due_date' },
+  delivery_jobs: { businessScoped: true, branchScoped: true, orderBy: 'created_at DESC' },
+  client_settings: { businessScoped: false, branchScoped: false, orderBy: 'updated_at DESC' },
+  // The sales book. A till that only stored the catalogue could say Saved
+  // and then show an empty receipt list, and a product count that vanished,
+  // once the line dropped. These rows are the same tables Turso holds.
+  // Child rows have no business column of their own, so they are limited
+  // through the parent. Secrets and the ledger stay off the device.
+  product_measures: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true, onStock: true },
+  purchase_order_items: { businessScoped: false, branchScoped: false, orderBy: 'updated_at', parent: { table: 'purchase_orders', column: 'purchase_order_id' } },
+  sales: { businessScoped: true, branchScoped: true, orderBy: 'sold_at' },
+  sale_items: { businessScoped: false, branchScoped: false, orderBy: 'updated_at', parent: { table: 'sales', column: 'sale_id' } },
+  sale_payments: { businessScoped: false, branchScoped: true, orderBy: 'updated_at' },
+  sale_serials: { businessScoped: false, branchScoped: true, softDelete: false, cursorColumn: 'created_at', orderBy: 'created_at' },
+  sale_returns: { businessScoped: true, branchScoped: true, orderBy: 'updated_at' },
+  sale_return_items: { businessScoped: false, branchScoped: false, orderBy: 'updated_at', parent: { table: 'sale_returns', column: 'sale_return_id' } },
+  customer_bills: { businessScoped: true, branchScoped: true, orderBy: 'raised_at' },
+  bill_holds: { businessScoped: false, branchScoped: false, softDelete: false, cursorColumn: 'created_at', orderBy: 'created_at', parent: { table: 'customer_bills', column: 'bill_id' } },
+  sale_issues: { businessScoped: true, branchScoped: true, softDelete: false, orderBy: 'updated_at' },
+  change_owed: { businessScoped: true, branchScoped: true, orderBy: 'created_at' },
+  till_sessions: { businessScoped: true, branchScoped: true, orderBy: 'opened_at' },
+  serial_numbers: { businessScoped: false, branchScoped: true, orderBy: 'serial_no' },
+};
+
+/** Strip anything a device should not carry around. */
+/**
+ * The till searches the shelf, not the 11,000-row catalogue. A phone that
+ * never finishes downloading every market name must still know that the
+ * cover shoe on the shelf is called a shoe. The name rides on the batch.
+ */
+async function attachStockProductNames(db, rows) {
+  const ids = [...new Set(rows.map((r) => r && r.product_id).filter(Boolean).map(String))];
+  const byId = new Map();
+  for (let i = 0; i < ids.length; i += 80) {
+    const chunk = ids.slice(i, i + 80);
+    const found = await db.all(
+      `SELECT p.id, p.name, p.sku, p.brand, p.model_no, p.selling_price, p.cost_price, p.is_active, p.base_unit_name,
+              p.dispensing_class, p.is_controlled, p.requires_serial, p.registration_no, p.category_id, p.nafdac_catalog_id,
+              c.code AS category_code, c.name AS category_name,
+              n.ingredient_name AS nafdac_ingredient, n.strength AS nafdac_strength,
+              n.dosage_form AS nafdac_dosage_form, n.pack_size AS nafdac_pack_size,
+              n.manufacturer AS nafdac_manufacturer, n.dispensing_type AS nafdac_dispensing_type
+         FROM products p
+         LEFT JOIN product_categories c ON c.id = p.category_id
+         LEFT JOIN nafdac_catalog n ON n.id = p.nafdac_catalog_id
+         WHERE p.id IN (${chunk.map(() => '?').join(',')})`,
+      chunk,
+    );
+    for (const p of found || []) byId.set(String(p.id), p);
+  }
+  return rows.map((r) => {
+    const p = byId.get(String(r.product_id));
+    if (!p) return r;
+    return Object.assign({}, r, {
+      product_name: p.name,
+      product_sku: p.sku,
+      product_brand: p.brand,
+      product_model_no: p.model_no,
+      product_selling_price: p.selling_price,
+      product_active: p.is_active,
+      product_base_unit: p.base_unit_name,
+      product_dispensing_class: p.dispensing_class,
+      product_is_controlled: p.is_controlled,
+      product_requires_serial: p.requires_serial,
+      product_category_id: p.category_id,
+      product_category_code: p.category_code,
+      product_category_name: p.category_name,
+      product_registration_no: p.registration_no,
+      product_nafdac_catalog_id: p.nafdac_catalog_id,
+      product_ingredient: p.nafdac_ingredient,
+      product_strength: p.nafdac_strength,
+      product_dosage_form: p.nafdac_dosage_form,
+      product_pack_size: p.nafdac_pack_size,
+      product_manufacturer: p.nafdac_manufacturer,
+      product_cost_price: p.cost_price,
+    });
+  });
+}
+
+function redactSettings(row) {
+  const out = { ...row };
+  for (const k of ['logo_data_url']) delete out[k]; // large, and branding has its own public endpoint
+  return out;
+}
+
+/**
+ * Scope check for a row about to be written.
+ *
+ * Resolves the row's branch through the database when the row itself carries no
+ * `branch_id` (a stocktake line belongs to a session which belongs to a branch),
+ * because guessing "no branch column means no restriction" would let a device at
+ * branch A edit branch B's counts.
+ */
+async function inScopeAsync(scope, row, db, spec) {
+  if (!scope) return false;
+  if (scope.allBusinesses && scope.allBranches) return true;
+  if (row.branch_id) {
+    if (scope.branchIds && !scope.branchIds.has(String(row.branch_id))) return false;
+  } else if (spec && spec.resolveBranch) {
+    const parent = await db.first(spec.resolveBranch.sql, [String(row[spec.resolveBranch.column])]);
+    const parentBranch = parent && parent[spec.resolveBranch.result];
+    if (parentBranch && scope.branchIds && !scope.branchIds.has(String(parentBranch))) return false;
+  }
+  if (row.business_id && scope.businessIds && !scope.businessIds.has(String(row.business_id))) return false;
+  return true;
+}
+
+function normaliseValue(v) {
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (v === undefined) return null;
+  if (v !== null && typeof v === 'object') return JSON.stringify(v);
+  return v;
+}
+
+function safeParse(json) {
+  try { return JSON.parse(json); } catch (e) { return json; }
+}
+
+function minutesSince(iso) {
+  const t = Date.parse(String(iso).replace(' ', 'T') + (String(iso).endsWith('Z') ? '' : 'Z'));
+  return Number.isFinite(t) ? Math.round((Date.now() - t) / 60000) : 0;
+}
+
+module.exports = { mount, LWW_TABLES, REPLAYABLE, PULLABLE, deviceShelfLimit, stockScope };
