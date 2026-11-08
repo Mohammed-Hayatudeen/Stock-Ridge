@@ -46,6 +46,17 @@ test('desktop install UI stripping preserves the rest of the document', () => {
   assert.match(result, /<main>Shop<\/main>/);
 });
 
+test('Android launcher supports Windows batch files and release tasks', () => {
+  const { gradleInvocation } = require('../tools/android-build');
+  const windows = gradleInvocation({ platform: 'win32' });
+  assert.match(windows.command, /gradlew\.bat$/);
+  assert.deepEqual(windows.args, ['assembleDebug']);
+  assert.equal(windows.options.shell, true);
+  const linuxRelease = gradleInvocation({ platform: 'linux', release: true });
+  assert.deepEqual(linuxRelease.args, ['assembleRelease']);
+  assert.equal(linuxRelease.options.shell, false);
+});
+
 test('Git metadata names only the current repository', () => {
   const pkg = require('../package.json');
   assert.equal(pkg.repository.url, 'git+https://github.com/Mohammed-Hayatudeen/Stock-Ridge.git');

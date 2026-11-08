@@ -2,6 +2,7 @@
   "name": "stockridge",
   "version": "1.0.0",
   "private": true,
+  "author": "StockRidge",
   "description": "StockRidge inventory, POS and back-office — one Worker/Turso backend with PWA, Electron and Android clients",
   "type": "commonjs",
   "main": "electron/main.js",
