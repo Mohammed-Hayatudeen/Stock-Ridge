@@ -48,10 +48,15 @@ test('desktop install UI stripping preserves the rest of the document', () => {
 
 test('Android launcher supports Windows batch files and release tasks', () => {
   const { gradleInvocation } = require('../tools/android-build');
-  const windows = gradleInvocation({ platform: 'win32' });
-  assert.match(windows.command, /gradlew\.bat$/);
-  assert.deepEqual(windows.args, ['assembleDebug']);
-  assert.equal(windows.options.shell, true);
+  const windows = gradleInvocation({ platform: 'win32', wrapperExists: () => true });
+  assert.match(windows.command, /cmd\.exe$/i);
+  assert.deepEqual(windows.args.slice(0, 3), ['/d', '/s', '/c']);
+  assert.match(windows.args[3], /gradlew\.bat$/);
+  assert.match(windows.args[3], /Stock-Ridge/);
+  assert.equal(windows.args[4], 'assembleDebug');
+  assert.equal(windows.options.shell, false);
+  const spaced = gradleInvocation({ platform: 'win32', root: 'C:\\Users\\Test User\\Stock Ridge', wrapperExists: () => true });
+  assert.equal(spaced.args[3], 'C:\\Users\\Test User\\Stock Ridge\\android\\gradlew.bat');
   const linuxRelease = gradleInvocation({ platform: 'linux', release: true });
   assert.deepEqual(linuxRelease.args, ['assembleRelease']);
   assert.equal(linuxRelease.options.shell, false);

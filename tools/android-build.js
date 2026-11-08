@@ -5,19 +5,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-function gradleInvocation({ platform = process.platform, root = path.resolve(__dirname, '..'), release = false } = {}) {
-  const android = path.join(root, 'android');
+function gradleInvocation({ platform = process.platform, root = path.resolve(__dirname, '..'), release = false, wrapperExists = fs.existsSync } = {}) {
+  const windows = platform === 'win32';
+  const platformPath = windows ? path.win32 : path;
+  const android = platformPath.join(root, 'android');
   const task = release ? 'assembleRelease' : 'assembleDebug';
-  const gradlew = path.join(android, platform === 'win32' ? 'gradlew.bat' : 'gradlew');
+  const gradlew = platformPath.join(android, windows ? 'gradlew.bat' : 'gradlew');
+  const executable = wrapperExists(gradlew) ? gradlew : 'gradle';
   return {
-    command: fs.existsSync(gradlew) ? gradlew : 'gradle',
-    args: [task],
+    // Execute the batch file through cmd.exe, not a shell command string.
+    // Discrete arguments preserve checkout paths containing spaces.
+    command: windows ? (process.env.ComSpec || 'cmd.exe') : executable,
+    args: windows ? ['/d', '/s', '/c', executable, task] : [task],
     options: {
       cwd: android,
       stdio: 'inherit',
-      // Current Node releases refuse to spawn Windows batch files directly
-      // with shell:false (EINVAL). The task and path are not user input.
-      shell: platform === 'win32',
+      shell: false,
     },
   };
 }
