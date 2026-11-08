@@ -58,6 +58,14 @@ jobs:
             exit "$status"
           fi
 
+      - name: Run explicitly requested idempotent PDF seed
+        if: hashFiles('production-seed-request.txt') != ''
+        env:
+          SEED_CONFIRM: SEED_PRODUCTION
+        run: |
+          test "$(cat production-seed-request.txt)" = "SEED_PRODUCTION"
+          node tools/seed-pin-production.js
+
       - name: Configure Worker secrets
         run: |
           printf '%s' "$TURSO_AUTH_TOKEN" | npx wrangler secret put TURSO_AUTH_TOKEN --env "" --config worker/wrangler.toml
