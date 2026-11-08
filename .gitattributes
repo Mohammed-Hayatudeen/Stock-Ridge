@@ -1,0 +1,2 @@
+# Migration bytes are immutable once applied; do not trim upstream trailing blank lines.
+schema/migrations/*.sql whitespace=-blank-at-eof
