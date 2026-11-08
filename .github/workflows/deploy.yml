@@ -45,7 +45,18 @@ jobs:
       - run: npm test
       - run: npm run check
       - run: npm run turso:check
-      - run: npm run turso:migrate
+      - name: Run Turso migrations with API-readable failure evidence
+        run: |
+          set +e
+          output="$(npm run turso:migrate 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            escaped="$(printf '%s\n' "$output" | tail -n 12 | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g')"
+            printf '::error::%s\n' "$escaped"
+            exit "$status"
+          fi
 
       - name: Configure Worker secrets
         run: |
