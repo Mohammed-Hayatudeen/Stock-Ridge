@@ -1,0 +1,45 @@
+name: Seed PDF structure into production Turso
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type SEED_PRODUCTION to insert only missing PDF records'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stockridge-production
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      SEED_CONFIRM: ${{ inputs.confirmation }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arena/710a3fbd-stock-ridge
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify explicit authorization and existing secret presence
+        run: |
+          test "$SEED_CONFIRM" = "SEED_PRODUCTION"
+          test -n "$TURSO_DATABASE_URL"
+          test -n "$TURSO_AUTH_TOKEN"
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm run turso:check
+      - name: Seed missing records and print aggregate read-back only
+        run: node tools/seed-pin-production.js
