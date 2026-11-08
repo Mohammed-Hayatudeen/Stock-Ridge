@@ -14,6 +14,14 @@ const DEFINITIONS = [
   { name: 'PharmaRidge', prefix: 'p', digit: 5, profile: 'PHARMACEUTICAL', first: 'pharmaHq', karu: 'pharmakaru' },
   { name: 'WareRidge', prefix: 'wa', digit: 6, profile: 'WHOLESALE_RETAIL', first: 'wareRidge HQ', karu: 'warekaru' },
   { name: 'woodRidge', prefix: 'wo', digit: 7, profile: 'FURNITURE', first: 'woodRidge HQ', karu: 'woodkaru' },
+  // Explicitly synthetic demonstrations for the remaining domain profiles.
+  { name: 'BuildRidge', prefix: 'bm', digit: 8, profile: 'BUILDING_MATERIALS', first: 'BuildRidge HQ', karu: 'BuildKaru' },
+  { name: 'EquipRidge', prefix: 'eq', digit: 9, profile: 'EQUIPMENT_RENTAL', first: 'EquipRidge HQ', karu: 'EquipKaru' },
+  { name: 'LeaseRidge', prefix: 'le', digit: 10, profile: 'LEASING', first: 'LeaseRidge HQ', karu: 'LeaseKaru' },
+  { name: 'SellLeaseRidge', prefix: 'sl', digit: 11, profile: 'SELL_AND_LEASE', first: 'SellLeaseRidge HQ', karu: 'SellLeaseKaru' },
+  { name: 'FabricRidge', prefix: 'pf', digit: 12, profile: 'PROVISIONS_FABRICS', first: 'FabricRidge HQ', karu: 'FabricKaru' },
+  { name: 'MarketRidge', prefix: 'su', digit: 13, profile: 'SUPERMARKET', first: 'MarketRidge HQ', karu: 'MarketKaru' },
+  { name: 'GeneralRidge', prefix: 'gr', digit: 14, profile: 'GENERAL_RETAIL', first: 'GeneralRidge HQ', karu: 'GeneralKaru' },
 ];
 
 function runtimePin(role, person, branch, business) {
@@ -22,7 +30,7 @@ function runtimePin(role, person, branch, business) {
 
 function accountsFor(definition) {
   const p = definition.prefix;
-  const d = definition.digit;
+  const d = definition.digit % 10;
   const display = p.charAt(0).toUpperCase() + p.slice(1);
   return [
     { username: `${p}staff1abuja`, fullName: `${display}staff1 Abuja`, role: 'STAFF', branch: 'first', pin: definition.digit === 1 ? [1, 2, 3, 4].join('') : runtimePin(1, 1, 1, d) },
@@ -99,7 +107,9 @@ async function seedPinData(db) {
     SELECT journal_entry_id FROM gl_journal_lines GROUP BY journal_entry_id HAVING ABS(SUM(debit)-SUM(credit))>0.02)`));
   return {
     ok: integrity === 'ok' && foreignKeys.length === 0 && unbalanced === 0
-      && businessCount === 7 && branchCount >= 14 && userCount === 42,
+      && businessCount === DEFINITIONS.length
+      && branchCount >= DEFINITIONS.length * 2
+      && userCount === DEFINITIONS.length * 6,
     ...totals,
     readBack: { businesses: businessCount, branches: branchCount, users: userCount },
     integrity: { sqlite: integrity, foreignKeyViolations: foreignKeys.length, unbalancedJournals: unbalanced },
