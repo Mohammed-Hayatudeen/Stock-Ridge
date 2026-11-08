@@ -142,6 +142,7 @@ function createWindow(url) {
     minHeight: 640,
     show: false,
     title: 'StockRidge',
+    icon: path.join(__dirname, '..', 'public', 'icons', 'icon-512.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

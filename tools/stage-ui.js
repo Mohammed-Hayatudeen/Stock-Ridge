@@ -11,7 +11,7 @@ const { SAMPLE_ORIGIN } = require('../electron/paths');
 const root = path.resolve(__dirname, '..');
 const uiSource = path.resolve(process.env.STOCKRIDGE_ROOT || root, 'public');
 const stage = path.join(root, 'build', 'stockridge', 'public');
-const iconSource = path.join(uiSource, 'icons', 'icon-512.png');
+const iconSource = path.join(uiSource, 'icons', 'icon-1024.png');
 const origin = process.env.STOCKRIDGE_ORIGIN || SAMPLE_ORIGIN;
 
 if (!fs.existsSync(path.join(uiSource, 'index.html'))) {
