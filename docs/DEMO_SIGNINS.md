@@ -80,4 +80,3 @@ Each new vertical has an Abuja headquarters and a Karu branch. Staff accounts be
 | `grmgr1karu` | MANAGER | GeneralKaru | `21214` |
 | `grstaff1karu` | STAFF | GeneralKaru | `11214` |
 | `grstaff2karu` | STAFF | GeneralKaru | `12214` |
-
