@@ -188,6 +188,13 @@ async function main() {
       }
     }
 
+    const { runSpecialized } = require('./simulate-specialized');
+    const specialized = await runSpecialized({
+      db, app, businesses, owner, settings, scope, secret, token,
+      setClock: (iso) => { clock = iso; },
+    });
+    errors.push(...specialized.errors);
+
     const integrity = await db.scalar('PRAGMA integrity_check');
     const fk = await db.all('PRAGMA foreign_key_check');
     const unbalanced = await db.scalar(`SELECT COUNT(*) FROM (
@@ -208,7 +215,7 @@ async function main() {
     const summary = {
       ok: errors.length === 0,
       period: { start: '2025-01-01', days, end: clock.slice(0, 10) },
-      metrics: Object.fromEntries(metrics), counts, uiContracts,
+      metrics: Object.fromEntries(metrics), counts, uiContracts, specialized,
       integrity: { sqlite: integrity, foreignKeyViolations: fk.length, unbalancedJournals: Number(unbalanced), invalidStockBatches: Number(negativeStock), invalidSales: Number(invalidSales) },
       durationSeconds: Math.round((Date.now() - started) / 100) / 10,
       databaseBytes: fs.statSync(file).size,
