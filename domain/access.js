@@ -157,11 +157,19 @@ function resolveMutationBranchId(scope, requestedBranchId, { required = true } =
     return null;
   }
   const own = scope.pinnedBranchId;
-  if (!requestedBranchId) return own;
-  if (String(requestedBranchId) !== String(own)) {
-    throw scopeError('You are signed in to one branch and cannot create records for another. Ask a general manager to do this, or sign in at the other branch.', 'BRANCH_SCOPE_VIOLATION');
+  if (!requestedBranchId) {
+    if (own) return own;
+    const accessible = Array.from(scope.branchIds || []);
+    if (accessible.length === 1) return accessible[0];
+    if (required) {
+      throw scopeError('Choose which branch this belongs to. The system will not guess when more than one branch is possible.', 'BRANCH_REQUIRED');
+    }
+    return null;
   }
-  return own;
+  if (!scope.branchIds.has(String(requestedBranchId))) {
+    throw scopeError('You cannot create records for a branch outside your access. Ask a general manager to do this, or sign in at the other branch.', 'BRANCH_SCOPE_VIOLATION');
+  }
+  return String(requestedBranchId);
 }
 
 /** Same rule on the business axis. */
@@ -177,7 +185,13 @@ function resolveMutationBusinessId(scope, requestedBusinessId, branchRow = null,
     return null;
   }
   const own = scope.pinnedBusinessId;
-  if (!requestedBusinessId) return own;
+  if (!requestedBusinessId) {
+    if (own) return own;
+    const accessible = Array.from(scope.businessIds || []);
+    if (accessible.length === 1) return accessible[0];
+    if (required) throw scopeError('Choose which business this belongs to.', 'BUSINESS_REQUIRED');
+    return null;
+  }
   if (!scope.businessIds.has(String(requestedBusinessId))) {
     throw scopeError('You do not have access to that business.', 'BUSINESS_SCOPE_VIOLATION');
   }

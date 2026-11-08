@@ -26,14 +26,14 @@
 /** Round to 2 decimal places, tolerant of IEEE-754 representation dust. */
 function round2(n) {
   if (!Number.isFinite(n)) return 0;
-  return Math.round((n + Number.EPSILON) * 100) / 100;
+  return Math.round((n + Math.sign(n) * Number.EPSILON) * 100) / 100;
 }
 
 /** Round to an arbitrary number of decimal places (unit costs keep more). */
 function roundTo(n, places) {
   if (!Number.isFinite(n)) return 0;
   const f = Math.pow(10, places);
-  return Math.round((n + Number.EPSILON) * f) / f;
+  return Math.round((n + Math.sign(n) * Number.EPSILON) * f) / f;
 }
 
 /** Coerce to a finite non-negative number, or null when it is not one. */
