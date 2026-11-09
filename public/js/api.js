@@ -207,7 +207,7 @@
       const controller = new AbortController();
       const timer = setTimeout(() => {
         try { controller.abort(new DOMException('The server did not answer in time.', 'AbortError')); } catch (e) { controller.abort(); }
-      }, 8000);
+      }, 45000);
       try {
         // /api/health is a real shop answer. The ping route is a 404, which
         // still proves the shop spoke, but health is the clearer check.
@@ -393,7 +393,7 @@
     throw err;
   }
 
-  async function request(method, path, { body, query, headers = {}, queue = false, idempotencyKey = null, timeoutMs = 20000, raw = false, retried = false, quiet = false } = {}) {
+  async function request(method, path, { body, query, headers = {}, queue = false, idempotencyKey = null, timeoutMs = 45000, raw = false, retried = false, quiet = false } = {}) {
     const url = buildUrl(path, query);
     const auth = loadToken();
     const verb = String(method || 'GET').toUpperCase();

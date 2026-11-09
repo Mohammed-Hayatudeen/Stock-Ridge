@@ -288,7 +288,7 @@ function chooseStaticFile(bundledExists, cachedExists) {
   return null;
 }
 
-function nodeUpstream(target, transport, url, method, headers, body, { family = undefined, rejectUnauthorized = true, timeout = 12000, signal = null } = {}) {
+function nodeUpstream(target, transport, url, method, headers, body, { family = undefined, rejectUnauthorized = true, timeout = 45000, signal = null } = {}) {
   return new Promise((resolve, reject) => {
     const options = {
       protocol: target.protocol,
@@ -335,7 +335,7 @@ function nodeUpstream(target, transport, url, method, headers, body, { family = 
   });
 }
 
-function netUpstream(target, url, method, headers, body, { timeout = 12000, signal = null } = {}) {
+function netUpstream(target, url, method, headers, body, { timeout = 45000, signal = null } = {}) {
   const electron = electronNet();
   if (!electron) return Promise.reject(new Error('Chromium network is not available.'));
   return new Promise((resolve, reject) => {
@@ -638,12 +638,12 @@ function readBudgets(urlPath, method) {
   // batched by the Worker; this envelope lets that real answer finish inside
   // the view's 25-second wait instead of abandoning it at the health-read 4.5s.
   if (path.split('?')[0] === '/api/dashboard') {
-    return { v4: 10000, node: 0, insecure: 4000, net: 0, sibling: 10000, catalogue: false, once: false };
+    return { v4: 45000, node: 0, insecure: 4000, net: 0, sibling: 10000, catalogue: false, once: false };
   }
   // Settings includes the owner's plan-usage counts, and its first visit also
   // loads the branding record. Keep these ordinary GETs bounded, but give the
   // primary route enough time to finish its small read pipeline before trying
-  // another transport. The Settings UI uses the shared 20s fetch deadline, so
+  // another transport. The Settings UI uses the shared 45s fetch deadline, so
   // the complete proxy envelope must remain below it. Writes keep the one-shot
   // budget below.
   const verb = String(method || 'GET').toUpperCase();
@@ -653,9 +653,9 @@ function readBudgets(urlPath, method) {
     return { v4: 10000, node: 0, insecure: 4000, net: 0, sibling: 5000, catalogue: false, once: false };
   }
   if (isOneShotWrite(method, path)) {
-    return { v4: 18000, node: 0, insecure: 0, net: 0, sibling: 0, catalogue: false, once: true };
+    return { v4: 45000, node: 0, insecure: 0, net: 0, sibling: 0, catalogue: false, once: true };
   }
-  return { v4: 4500, node: 3500, insecure: 3500, net: 3500, sibling: 4000, catalogue: false, once: false };
+  return { v4: 45000, node: 3500, insecure: 3500, net: 3500, sibling: 4000, catalogue: false, once: false };
 }
 
 async function askShopRead(hostTarget, hostTransport, url, method, pageHeaders, nodeHeaders, body, deviceId) {
