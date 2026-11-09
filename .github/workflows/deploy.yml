@@ -74,6 +74,16 @@ jobs:
       - run: npx wrangler deploy --dry-run --env "" --config worker/wrangler.toml --outdir .cache/worker-dry-run
       - run: npm run worker:deploy
 
+      - name: Set the StockRidge Workers account subdomain
+        run: |
+          response="$(curl --fail --silent --show-error --request PUT \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{"subdomain":"stockridge"}' \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain")"
+          printf '%s\n' "$response"
+          printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.success||!r.result||r.result.subdomain!=='stockridge')process.exit(1)})"
+
       - name: Attach beta explicitly to workers.dev
         run: |
           response="$(curl --fail --silent --show-error --request POST \
