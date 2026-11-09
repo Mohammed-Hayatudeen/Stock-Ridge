@@ -103,4 +103,32 @@ jobs:
           printf '%s\n' "$response"
           printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.ok)process.exit(1)})"
 
+      - name: Exercise demo login and dashboard without exposing credentials
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const doc = fs.readFileSync('docs/DEMO_SIGNINS.md', 'utf8');
+          const row = doc.split('\n').find((line) => line.includes('`bmstaff1abuja`'));
+          const cells = row.split('|').map((cell) => cell.trim());
+          const username = cells[1].replaceAll('`', '');
+          const pin = cells[4].replaceAll('`', '');
+          const base = 'https://beta.stockridge0.workers.dev';
+          const started = Date.now();
+          const login = await fetch(base + '/api/auth/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ username, pin, remember: false, deviceId: 'deploy-smoke-demo' }),
+          });
+          const auth = await login.json();
+          if (!login.ok || !auth.token || !auth.profile) throw new Error(`Demo login failed: ${login.status} ${auth.code || ''}`);
+          const profile = auth.profile;
+          const query = new URLSearchParams({ business_id: profile.businessId, branch_id: profile.branchId });
+          const dashboard = await fetch(base + '/api/dashboard?' + query, {
+            headers: { authorization: `Bearer ${auth.token}`, accept: 'application/json' },
+          });
+          const body = await dashboard.json();
+          if (!dashboard.ok) throw new Error(`Dashboard failed: ${dashboard.status} ${body.code || ''} ${body.error || ''}`);
+          console.log(`Demo login and dashboard passed in ${Date.now() - started}ms; credentials and token withheld.`);
+          JS
+
 
