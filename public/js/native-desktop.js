@@ -266,7 +266,7 @@
         const controller = new AbortController();
         const timer = setTimeout(() => {
           try { controller.abort(new DOMException('The shop did not answer in time.', 'AbortError')); } catch (e) { controller.abort(); }
-        }, 80000);
+        }, 180000);
         try {
           return await origFetch(target, Object.assign({}, next, { signal: controller.signal }));
         } catch (again) {

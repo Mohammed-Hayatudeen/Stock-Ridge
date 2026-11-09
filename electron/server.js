@@ -288,7 +288,7 @@ function chooseStaticFile(bundledExists, cachedExists) {
   return null;
 }
 
-function nodeUpstream(target, transport, url, method, headers, body, { family = undefined, rejectUnauthorized = true, timeout = 80000, signal = null } = {}) {
+function nodeUpstream(target, transport, url, method, headers, body, { family = undefined, rejectUnauthorized = true, timeout = 180000, signal = null } = {}) {
   return new Promise((resolve, reject) => {
     const options = {
       protocol: target.protocol,
@@ -335,7 +335,7 @@ function nodeUpstream(target, transport, url, method, headers, body, { family = 
   });
 }
 
-function netUpstream(target, url, method, headers, body, { timeout = 80000, signal = null } = {}) {
+function netUpstream(target, url, method, headers, body, { timeout = 180000, signal = null } = {}) {
   const electron = electronNet();
   if (!electron) return Promise.reject(new Error('Chromium network is not available.'));
   return new Promise((resolve, reject) => {
@@ -632,13 +632,13 @@ function requestMayHaveLanded(err) {
 function readBudgets(urlPath, method) {
   const path = String(urlPath && urlPath.pathname ? urlPath.pathname : urlPath || '');
   if (path.indexOf('/api/sync/pull') !== -1 || path.indexOf('/api/sync/push') !== -1) {
-    return { v4: 80000, node: 0, insecure: 80000, net: 0, sibling: 8000, catalogue: true, once: false };
+    return { v4: 180000, node: 0, insecure: 180000, net: 0, sibling: 8000, catalogue: true, once: false };
   }
   // The full dashboard derives many figures. Its independent SELECTs are
   // batched by the Worker; this envelope lets that real answer finish inside
   // the view's 80-second wait instead of abandoning it at the health-read 4.5s.
   if (path.split('?')[0] === '/api/dashboard') {
-    return { v4: 80000, node: 0, insecure: 4000, net: 0, sibling: 10000, catalogue: false, once: false };
+    return { v4: 180000, node: 0, insecure: 4000, net: 0, sibling: 10000, catalogue: false, once: false };
   }
   // Settings includes the owner's plan-usage counts, and its first visit also
   // loads the branding record. Keep these ordinary GETs bounded, but give the
@@ -650,12 +650,12 @@ function readBudgets(urlPath, method) {
   const readPath = path.split('?')[0];
   if ((verb === 'GET' || verb === 'HEAD')
       && (readPath === '/api/settings' || readPath === '/api/branding/full')) {
-    return { v4: 80000, node: 0, insecure: 4000, net: 0, sibling: 5000, catalogue: false, once: false };
+    return { v4: 180000, node: 0, insecure: 4000, net: 0, sibling: 5000, catalogue: false, once: false };
   }
   if (isOneShotWrite(method, path)) {
-    return { v4: 80000, node: 0, insecure: 0, net: 0, sibling: 0, catalogue: false, once: true };
+    return { v4: 180000, node: 0, insecure: 0, net: 0, sibling: 0, catalogue: false, once: true };
   }
-  return { v4: 80000, node: 3500, insecure: 3500, net: 3500, sibling: 4000, catalogue: false, once: false };
+  return { v4: 180000, node: 3500, insecure: 3500, net: 3500, sibling: 4000, catalogue: false, once: false };
 }
 
 async function askShopRead(hostTarget, hostTransport, url, method, pageHeaders, nodeHeaders, body, deviceId) {

@@ -1272,7 +1272,7 @@
                   try {
                     result = await SR.api.post('/api/purchase-orders', body, {
                       idempotencyKey: button._raiseKey,
-                      timeoutMs: 80000,
+                      timeoutMs: 180000,
                     });
                     lastErr = null;
                     break;

@@ -93,9 +93,9 @@
     }
 
     async function readDashboard() {
-      const data = await SR.api.get('/api/dashboard', { query: SR.state.query(), timeoutMs: 80000 });
+      const data = await SR.api.get('/api/dashboard', { query: SR.state.query(), timeoutMs: 180000 });
       let changeOwed = null;
-      try { changeOwed = await SR.api.get('/api/change-owed/summary', { timeoutMs: 80000 }); } catch (e) { changeOwed = null; }
+      try { changeOwed = await SR.api.get('/api/change-owed/summary', { timeoutMs: 180000 }); } catch (e) { changeOwed = null; }
       if (SR.api.noteReachable) SR.api.noteReachable(true);
       return { data, changeOwed, offline: false };
     }

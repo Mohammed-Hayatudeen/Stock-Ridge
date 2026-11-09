@@ -125,7 +125,7 @@
   }
 
   function holdCatchUp(ms, options) {
-    const until = Date.now() + (Number(ms) || 180000);
+    const until = Date.now() + (Number(ms) || 1180000);
     const shorten = Boolean(options && options.shorten);
     if (!shorten) lineReturnedAt = Date.now();
     global.SR._catchingUp = true;
@@ -143,7 +143,7 @@
     const was = online;
     if (value === online) return;
     online = value;
-    if (value && !was) holdCatchUp(180000);
+    if (value && !was) holdCatchUp(1180000);
     if (!silent) emit('net', { online, returned: value && !was });
   }
 
@@ -168,7 +168,7 @@
   // The online event is the catch-up, even when the flag was already true.
   global.addEventListener('online', () => {
     lineCatchUp = true;
-    holdCatchUp(180000);
+    holdCatchUp(1180000);
     probe({ force: true }).catch(() => {});
   });
   global.addEventListener('offline', () => {
@@ -207,7 +207,7 @@
       const controller = new AbortController();
       const timer = setTimeout(() => {
         try { controller.abort(new DOMException('The server did not answer in time.', 'AbortError')); } catch (e) { controller.abort(); }
-      }, 80000);
+      }, 180000);
       try {
         // /api/health is a real shop answer. The ping route is a 404, which
         // still proves the shop spoke, but health is the clearer check.
@@ -558,7 +558,7 @@
       // Cold Workers, PBKDF2, session creation and audit writes share this one
       // response. Eight seconds aborted valid sign-ins on otherwise healthy
       // deployments. Keep one attempt: never blindly repeat a login mutation.
-      timeoutMs: 80000,
+      timeoutMs: 180000,
     });
     if (out.token) setToken(out.token, { remember: Boolean(remember) });
     return out;

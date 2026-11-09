@@ -404,7 +404,7 @@ function createTursoDatabase({ url, authToken, name = null, connect = null } = {
     return json || { results: [] };
   }
 
-  async function post(requests, { timeoutMs = 80000, baton = null } = {}) {
+  async function post(requests, { timeoutMs = 180000, baton = null } = {}) {
     const body = JSON.stringify(requestBody(requests, baton));
     if (lane) {
       try {
@@ -446,7 +446,7 @@ function createTursoDatabase({ url, authToken, name = null, connect = null } = {
    * statements: Turso keeps executing the pipeline after an error, so a
    * COMMIT later in the same request would keep the earlier writes.
    */
-  async function pipeline(statements, { foreignKeys = true, timeoutMs = 80000 } = {}) {
+  async function pipeline(statements, { foreignKeys = true, timeoutMs = 180000 } = {}) {
     const requests = [];
     if (foreignKeys) requests.push({ type: 'execute', stmt: { sql: 'PRAGMA foreign_keys = ON' } });
     for (const statement of statements) requests.push(statementRequest(statement));
@@ -481,7 +481,7 @@ function createTursoDatabase({ url, authToken, name = null, connect = null } = {
    * fails, the follow-up is ROLLBACK, and closing an open transaction rolls
    * it back as well.
    */
-  async function atomic(statements, { timeoutMs = 80000, foreignKeys = true } = {}) {
+  async function atomic(statements, { timeoutMs = 180000, foreignKeys = true } = {}) {
     const requests = [
       { type: 'execute', stmt: { sql: foreignKeys ? 'PRAGMA foreign_keys = ON' : 'PRAGMA foreign_keys = OFF' } },
       { type: 'execute', stmt: { sql: 'BEGIN' } },
@@ -554,7 +554,7 @@ function createTursoDatabase({ url, authToken, name = null, connect = null } = {
     async exec(sql) {
       const statements = splitSql(sql);
       for (const statement of statements) {
-        const timeoutMs = statement.length > 200000 ? 120000 : 80000;
+        const timeoutMs = statement.length > 200000 ? 120000 : 180000;
         await pipeline([{ sql: statement }], { timeoutMs });
       }
       return { ok: true, count: statements.length };
@@ -567,7 +567,7 @@ function createTursoDatabase({ url, authToken, name = null, connect = null } = {
       }
       // One ordered pipeline on the existing lane. Unlike Promise.all this
       // does not queue another HTTP request per SELECT inside the Worker.
-      const results = await pipeline(list, { timeoutMs: 80000, ...options });
+      const results = await pipeline(list, { timeoutMs: 180000, ...options });
       return results.map(decodeRows);
     },
     async batch(statements, options = {}) {
