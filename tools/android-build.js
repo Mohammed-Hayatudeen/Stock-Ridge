@@ -13,10 +13,10 @@ function gradleInvocation({ platform = process.platform, root = path.resolve(__d
   const gradlew = platformPath.join(android, windows ? 'gradlew.bat' : 'gradlew');
   const executable = wrapperExists(gradlew) ? gradlew : 'gradle';
   return {
-    // cmd /s /c requires one quoted command line. The doubled outer quotes
-    // preserve both the wrapper path and task when the checkout contains spaces.
+    // Keep the quoted executable and task as distinct verbatim cmd arguments.
+    // /s outer-quote rewriting would otherwise merge the task into the filename.
     command: windows ? (process.env.ComSpec || 'cmd.exe') : executable,
-    args: windows ? ['/d', '/s', '/c', `""${executable}" ${task}`] : [task],
+    args: windows ? ['/d', '/c', `"${executable}"`, task] : [task],
     options: {
       cwd: android,
       stdio: 'inherit',
