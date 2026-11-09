@@ -1690,7 +1690,7 @@
           lines: cart.lines.map((l) => linePayload(l)),
           walk_in_name: cart.customerName || null,
           walk_in_phone: cart.customerPhone || null,
-        }, { timeoutMs: 9000 });
+        }, { timeoutMs: 80000 });
         if (seq !== previewSeq) return;
         showPreviewWarnings(result);
       } catch (err) {
@@ -1883,7 +1883,7 @@
           lines: cart.lines.map((l) => linePayload(l)),
           walk_in_name: cart.customerName || null,
           walk_in_phone: cart.customerPhone || null,
-        }, { timeoutMs: 9000 });
+        }, { timeoutMs: 80000 });
       } catch (err) {
         return;
       }
@@ -2241,7 +2241,7 @@
       const btn = document.getElementById('pos-complete');
       if (btn) { btn.disabled = true; btn.textContent = 'Holding the goods…'; }
       try {
-        const res = await SR.api.post('/api/bills', payload, { timeoutMs: 25000 });
+        const res = await SR.api.post('/api/bills', payload, { timeoutMs: 80000 });
         const bill = res.bill || res;
         bill.brand = (SR.state.settings || {}).business_name || 'StockRidge';
         bill.branch_name = bill.branch_name || SR.state.activeBranchName();
@@ -2437,7 +2437,7 @@
             payments,
             walk_in_name: bill.customer_name,
             customer_name: bill.customer_name,
-          }, { timeoutMs: 25000 });
+          }, { timeoutMs: 80000 });
           payModal.close();
           if (listModal) listModal.close();
           showPaidDocument(result, bill);
@@ -2621,7 +2621,7 @@
           // The write-ahead row and this direct attempt are one logical sale.
           // If the response is lost, sync replays the same key and the Worker
           // returns the original sale instead of ringing it a second time.
-          const live = await SR.api.post('/api/sales', payload, { timeoutMs: 25000, idempotencyKey: queued.clientId });
+          const live = await SR.api.post('/api/sales', payload, { timeoutMs: 80000, idempotencyKey: queued.clientId });
           if (live && !live.offline && !live.queued && SR.store.markSynced) {
             await SR.store.markSynced(queued.clientId, (live.sale && live.sale.id) || live.saleId || live.receiptNo || null).catch(() => {});
           }

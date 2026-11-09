@@ -327,7 +327,7 @@
               branch_id: SR.state.activeBranchId,
             }, { idempotencyKey: SR.util.localId('till-open') });
             const opened = res && res.id
-              ? await SR.api.get('/api/tills/' + encodeURIComponent(res.id), { timeoutMs: 15000 }).catch(() => null)
+              ? await SR.api.get('/api/tills/' + encodeURIComponent(res.id), { timeoutMs: 80000 }).catch(() => null)
               : null;
             const saved = (opened && opened.till) || {
               id: res && res.id,

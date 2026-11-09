@@ -632,25 +632,25 @@ function requestMayHaveLanded(err) {
 function readBudgets(urlPath, method) {
   const path = String(urlPath && urlPath.pathname ? urlPath.pathname : urlPath || '');
   if (path.indexOf('/api/sync/pull') !== -1 || path.indexOf('/api/sync/push') !== -1) {
-    return { v4: 55000, node: 0, insecure: 55000, net: 0, sibling: 8000, catalogue: true, once: false };
+    return { v4: 80000, node: 0, insecure: 80000, net: 0, sibling: 8000, catalogue: true, once: false };
   }
   // The full dashboard derives many figures. Its independent SELECTs are
   // batched by the Worker; this envelope lets that real answer finish inside
-  // the view's 25-second wait instead of abandoning it at the health-read 4.5s.
+  // the view's 80-second wait instead of abandoning it at the health-read 4.5s.
   if (path.split('?')[0] === '/api/dashboard') {
     return { v4: 80000, node: 0, insecure: 4000, net: 0, sibling: 10000, catalogue: false, once: false };
   }
   // Settings includes the owner's plan-usage counts, and its first visit also
   // loads the branding record. Keep these ordinary GETs bounded, but give the
   // primary route enough time to finish its small read pipeline before trying
-  // another transport. The Settings UI uses the shared 45s fetch deadline, so
+  // another transport. The Settings UI uses the shared 80s fetch deadline, so
   // the complete proxy envelope must remain below it. Writes keep the one-shot
   // budget below.
   const verb = String(method || 'GET').toUpperCase();
   const readPath = path.split('?')[0];
   if ((verb === 'GET' || verb === 'HEAD')
       && (readPath === '/api/settings' || readPath === '/api/branding/full')) {
-    return { v4: 10000, node: 0, insecure: 4000, net: 0, sibling: 5000, catalogue: false, once: false };
+    return { v4: 80000, node: 0, insecure: 4000, net: 0, sibling: 5000, catalogue: false, once: false };
   }
   if (isOneShotWrite(method, path)) {
     return { v4: 80000, node: 0, insecure: 0, net: 0, sibling: 0, catalogue: false, once: true };

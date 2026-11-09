@@ -158,7 +158,7 @@
 
     let result;
     try {
-      result = await SR.api.post('/api/sync/push', body, { timeoutMs: 45000, quiet: true });
+      result = await SR.api.post('/api/sync/push', body, { timeoutMs: 80000, quiet: true });
     } catch (err) {
       lastError = err.message;
       const deadToken = err && (err.code === 'TOKEN_EXPIRED' || err.code === 'BAD_TOKEN' || err.code === 'NO_TOKEN' || err.code === 'SESSION_SUPERSEDED');
@@ -534,7 +534,7 @@
       let lastErr = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          return { ok: true, result: await SR.api.post('/api/sync/pull', body, { timeoutMs: 40000 }) };
+          return { ok: true, result: await SR.api.post('/api/sync/pull', body, { timeoutMs: 80000 }) };
         } catch (err) {
           lastErr = err;
           if (!transient(err) || attempt === 2) break;
@@ -855,7 +855,7 @@
       let missed = false;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          data = await SR.api.get(path, { query: Object.assign({ limit: 200, offset }, query || {}), timeoutMs: 20000 });
+          data = await SR.api.get(path, { query: Object.assign({ limit: 200, offset }, query || {}), timeoutMs: 80000 });
           missed = false;
           break;
         } catch (err) {
@@ -951,7 +951,7 @@
   // A phone shop's hire route answers 403. That is not a missing catalogue.
   // The full row is stored. Turso stays behind the Worker.
   async function ownedProductCount() {
-    const data = await SR.api.get('/api/products', { query: { owned: 1, limit: 1 }, timeoutMs: 12000 }).catch(() => null);
+    const data = await SR.api.get('/api/products', { query: { owned: 1, limit: 1 }, timeoutMs: 80000 }).catch(() => null);
     const total = data && data.paging ? Number(data.paging.total) : null;
     return Number.isFinite(total) ? total : null;
   }
@@ -981,7 +981,7 @@
       const agreeDone = [];
       for (let i = 0; i < agreeTargets.length; i += 4) {
         const chunk = agreeTargets.slice(i, i + 4);
-        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/agreements/' + encodeURIComponent(row.id), { timeoutMs: 15000 }).catch(() => null)));
+        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/agreements/' + encodeURIComponent(row.id), { timeoutMs: 80000 }).catch(() => null)));
         for (let n = 0; n < details.length; n += 1) {
           const detail = details[n];
           if (!detail) continue;
@@ -1007,7 +1007,7 @@
       const jobDone = [];
       for (let i = 0; i < jobTargets.length; i += 4) {
         const chunk = jobTargets.slice(i, i + 4);
-        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/deliveries/' + encodeURIComponent(row.id), { timeoutMs: 15000 }).catch(() => null)));
+        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/deliveries/' + encodeURIComponent(row.id), { timeoutMs: 80000 }).catch(() => null)));
         for (let n = 0; n < details.length; n += 1) {
           const detail = details[n];
           if (!detail) continue;
@@ -1032,7 +1032,7 @@
       const planDone = [];
       for (let i = 0; i < planTargets.length; i += 4) {
         const chunk = planTargets.slice(i, i + 4);
-        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/instalments/' + encodeURIComponent(row.id), { timeoutMs: 15000 }).catch(() => null)));
+        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/instalments/' + encodeURIComponent(row.id), { timeoutMs: 80000 }).catch(() => null)));
         for (let n = 0; n < details.length; n += 1) {
           const detail = details[n];
           if (!detail) continue;
@@ -1054,7 +1054,7 @@
       const transferDone = [];
       for (let i = 0; i < transferTargets.length; i += 4) {
         const chunk = transferTargets.slice(i, i + 4);
-        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/transfers/' + encodeURIComponent(row.id), { timeoutMs: 15000 }).catch(() => null)));
+        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/transfers/' + encodeURIComponent(row.id), { timeoutMs: 80000 }).catch(() => null)));
         for (let n = 0; n < details.length; n += 1) {
           const detail = details[n];
           if (!detail) continue;
@@ -1073,7 +1073,7 @@
       const countDone = [];
       for (let i = 0; i < countTargets.length; i += 3) {
         const chunk = countTargets.slice(i, i + 3);
-        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/stocktakes/' + encodeURIComponent(row.id), { timeoutMs: 15000 }).catch(() => null)));
+        const details = await Promise.all(chunk.map((row) => SR.api.get('/api/stocktakes/' + encodeURIComponent(row.id), { timeoutMs: 80000 }).catch(() => null)));
         for (let n = 0; n < details.length; n += 1) {
           const detail = details[n];
           if (!detail) continue;
@@ -1092,11 +1092,11 @@
       wrote += await saveRows('debtor_ledger', (await copyPaged('/api/customers/debtors', q, first ? 3 : 1)).map((row) => stamp(row, business.id)));
       wrote += await saveRows('controlled_substance_register', (await copyPaged('/api/pharmacy/register', q, first ? 2 : 1)).map((row) => stamp(row, business.id)));
 
-      const fleet = await SR.api.get('/api/dispatch', { query: q, timeoutMs: 15000 }).catch(() => null);
+      const fleet = await SR.api.get('/api/dispatch', { query: q, timeoutMs: 80000 }).catch(() => null);
       wrote += await saveRows('delivery_vehicles', rowsOf(fleet).map((row) => stamp(row, business.id)));
-      const duties = await SR.api.get('/api/dispatch/duties', { query: Object.assign({ active: 0, mine: 0 }, q), timeoutMs: 15000 }).catch(() => null);
+      const duties = await SR.api.get('/api/dispatch/duties', { query: Object.assign({ active: 0, mine: 0 }, q), timeoutMs: 80000 }).catch(() => null);
       wrote += await saveRows('vehicle_duties', rowsOf(duties).map((row) => stamp(row, business.id)));
-      const plant = await SR.api.get('/api/plant', { query: q, timeoutMs: 20000 }).catch(() => null);
+      const plant = await SR.api.get('/api/plant', { query: q, timeoutMs: 80000 }).catch(() => null);
       const assets = ((plant && plant.assets) || []).map((row) => row && row.id != null ? {
         id: row.id,
         business_id: business.id,
@@ -1133,7 +1133,7 @@
     const registrations = [];
     for (let i = 0; i < needsDetail.length; i += 4) {
       const chunk = needsDetail.slice(i, i + 4);
-      const details = await Promise.all(chunk.map((row) => SR.api.get('/api/products/' + encodeURIComponent(row.id), { timeoutMs: 15000 }).catch(() => null)));
+      const details = await Promise.all(chunk.map((row) => SR.api.get('/api/products/' + encodeURIComponent(row.id), { timeoutMs: 80000 }).catch(() => null)));
       for (const detail of details) {
         if (!detail || !detail.product || detail.product.id == null) continue;
         wrote += await saveRows('products', [detail.product]);
@@ -1262,7 +1262,7 @@
     for (let page = 0; page < 6; page += 1) {
       const extra = { from: '2020-01-01', to, limit: 200, offset };
       if (status) extra.status = status;
-      const data = await SR.api.get('/api/tills', { query: query(extra), timeoutMs: 20000 }).catch(() => null);
+      const data = await SR.api.get('/api/tills', { query: query(extra), timeoutMs: 80000 }).catch(() => null);
       if (!data) return null;
       const rows = (data.data || []).filter((row) => row && row.id != null);
       tills.push(...rows);
@@ -1275,9 +1275,9 @@
   async function copyCounterBooks() {
     const query = (extra) => (SR.state && SR.state.query ? SR.state.query(extra) : extra);
     let wrote = 0;
-    const current = await SR.api.get('/api/tills/current', { query: query({}), timeoutMs: 15000 }).catch(() => null);
+    const current = await SR.api.get('/api/tills/current', { query: query({}), timeoutMs: 80000 }).catch(() => null);
     if (current && current.till && current.till.id != null) wrote += await saveRows('till_sessions', [current.till]);
-    const today = await SR.api.get('/api/attendance/today', { query: query({}), timeoutMs: 15000 }).catch(() => null);
+    const today = await SR.api.get('/api/attendance/today', { query: query({}), timeoutMs: 80000 }).catch(() => null);
     const liveAttendance = [];
     for (const row of (today && (today.records || today.data)) || []) if (row && row.id != null) liveAttendance.push(row);
     if (today && today.myOpen && today.myOpen.id != null) liveAttendance.push(today.myOpen);
@@ -1301,18 +1301,18 @@
     const from = last ? dayBefore(last) : '2020-01-01';
     const tills = [];
     for (const status of [undefined]) {
-      const data = await SR.api.get('/api/tills', { query: query({ status, from, to, limit: 200 }), timeoutMs: 20000 }).catch(() => null);
+      const data = await SR.api.get('/api/tills', { query: query({ status, from, to, limit: 200 }), timeoutMs: 80000 }).catch(() => null);
       if (!data) continue;
       for (const row of (data && data.data) || []) if (row && row.id != null) tills.push(row);
     }
     wrote += await saveRows('till_sessions', tills);
-    const history = await SR.api.get('/api/attendance', { query: query({ from, to, limit: 200 }), timeoutMs: 20000 }).catch(() => null);
+    const history = await SR.api.get('/api/attendance', { query: query({ from, to, limit: 200 }), timeoutMs: 80000 }).catch(() => null);
     wrote += await saveRows('staff_attendance', (history && history.data) || []);
     const owed = [];
     let offset = 0;
     const pages = last ? 1 : 6;
     for (let page = 0; page < pages; page += 1) {
-      const data = await SR.api.get('/api/change-owed', { query: query({ status: 'ALL', limit: 200, offset }), timeoutMs: 20000 }).catch(() => null);
+      const data = await SR.api.get('/api/change-owed', { query: query({ status: 'ALL', limit: 200, offset }), timeoutMs: 80000 }).catch(() => null);
       const rows = (data && data.data) || [];
       owed.push(...rows.filter((row) => row && row.id != null));
       if (!rows.length || !data.paging || !data.paging.hasMore) break;
@@ -1342,8 +1342,8 @@
       let complete = false;
       let failed = false;
       for (let page = 0; page < pages; page += 1) {
-        let data = await SR.api.get('/api/sales', { query: { from, to, limit: 500, offset }, timeoutMs: 25000 }).catch(() => null);
-        if (!data) data = await SR.api.get('/api/sales', { query: { from, to, limit: 500, offset }, timeoutMs: 25000 }).catch(() => null);
+        let data = await SR.api.get('/api/sales', { query: { from, to, limit: 500, offset }, timeoutMs: 80000 }).catch(() => null);
+        if (!data) data = await SR.api.get('/api/sales', { query: { from, to, limit: 500, offset }, timeoutMs: 80000 }).catch(() => null);
         if (!data) { failed = true; break; }
         const rows = (data.data || []).filter((row) => row && row.id != null);
         headers.push(...rows);
@@ -1378,7 +1378,7 @@
     const failed = [];
     for (let i = 0; i < batch.length; i += 4) {
       const chunk = batch.slice(i, i + 4);
-      const details = await Promise.all(chunk.map((row) => SR.api.get('/api/sales/' + encodeURIComponent(row.id), { timeoutMs: 20000 }).catch(() => null)));
+      const details = await Promise.all(chunk.map((row) => SR.api.get('/api/sales/' + encodeURIComponent(row.id), { timeoutMs: 80000 }).catch(() => null)));
       for (let n = 0; n < details.length; n += 1) {
         const detail = details[n];
         const asked = chunk[n];
@@ -1407,7 +1407,7 @@
       const bills = [];
       const statuses = fullDue || !billsAt ? ['OPEN', 'PAYING', 'PAID', 'CANCELLED'] : ['OPEN', 'PAYING'];
       for (const status of statuses) {
-        const data = await SR.api.get('/api/bills', { query: { status }, timeoutMs: 20000 }).catch(() => null);
+        const data = await SR.api.get('/api/bills', { query: { status }, timeoutMs: 80000 }).catch(() => null);
         for (const row of (data && data.data) || []) if (row && row.id != null) bills.push(row);
       }
       wrote += await saveRows('customer_bills', bills);
@@ -1674,7 +1674,7 @@
     // already knows if its own pages were truncated.
     if (Date.now() - shopCountCheckedAt < 15 * 60 * 1000) return;
     shopCountCheckedAt = Date.now();
-    SR.api.get('/api/products', { query: SR.state.query({ owned: 1, limit: 1 }), timeoutMs: 20000 }).then(async (data) => {
+    SR.api.get('/api/products', { query: SR.state.query({ owned: 1, limit: 1 }), timeoutMs: 80000 }).then(async (data) => {
       const shopCount = data && data.paging ? Number(data.paging.total) : null;
       if (!Number.isFinite(shopCount)) return;
       await SR.store.metaSet('shop_product_count', shopCount);
