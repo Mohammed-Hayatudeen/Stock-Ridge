@@ -67,6 +67,16 @@ test('Android launcher supports Windows batch files and release tasks', () => {
   assert.equal(linuxRelease.options.shell, false);
 });
 
+test('Android Java source ends at its class boundary and native script is an asset', () => {
+  const java = fs.readFileSync(path.join(root, 'android/app/src/main/java/com/stockridge/till/MainActivity.java'), 'utf8');
+  const script = fs.readFileSync(path.join(root, 'android/app/src/main/assets/hide-install.js'), 'utf8');
+  assert.match(java.trim(), /\}\s*$/);
+  assert.doesNotMatch(java, /\}\s*\(function \(\)/);
+  assert.match(java, /readAsset\("hide-install\.js"\)/);
+  assert.match(script, /^\(function \(\)/);
+  assert.match(script, /sendWaiting/);
+});
+
 test('Git metadata names only the current repository', () => {
   const pkg = require('../package.json');
   assert.equal(pkg.repository.url, 'git+https://github.com/Mohammed-Hayatudeen/Stock-Ridge.git');
