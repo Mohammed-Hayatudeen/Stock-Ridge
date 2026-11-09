@@ -12,10 +12,14 @@
       <stop offset="0.5" stop-color="#45c986"/>
       <stop offset="1" stop-color="#269761"/>
     </linearGradient>
-    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#b9994e"/>
-      <stop offset="0.5" stop-color="#e2cb87"/>
-      <stop offset="1" stop-color="#b5974c"/>
+    <linearGradient id="block-front" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#13271d"/>
+      <stop offset="0.55" stop-color="#0a1911"/>
+      <stop offset="1" stop-color="#06110b"/>
+    </linearGradient>
+    <linearGradient id="block-side" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#09150e"/>
+      <stop offset="1" stop-color="#020805"/>
     </linearGradient>
   </defs>
 
@@ -32,20 +36,20 @@
   <g id="stacked-blocks" stroke-linejoin="round" transform="translate(-64 46) scale(1.25 .8)">
     <g id="cube-top">
       <path d="M198 170L214 158H330L314 170Z" fill="#355444"/>
-      <path d="M314 170L330 158V228L314 240Z" fill="#050d09"/>
-      <rect x="198" y="170" width="116" height="70" rx="2" fill="#0c1812"/>
+      <path d="M314 170L330 158V228L314 240Z" fill="url(#block-side)"/>
+      <rect x="198" y="170" width="116" height="70" fill="url(#block-front)" stroke="#507461" stroke-opacity=".34" stroke-width="1"/>
       <path d="M198 170H314L330 158" fill="none" stroke="#6d8978" stroke-opacity="0.45" stroke-width="1.5"/>
     </g>
     <g id="cube-middle">
       <path d="M198 240L214 228H330L314 240Z" fill="#355444"/>
-      <path d="M314 240L330 228V298L314 310Z" fill="#050d09"/>
-      <rect x="198" y="240" width="116" height="70" rx="2" fill="#0c1812"/>
+      <path d="M314 240L330 228V298L314 310Z" fill="url(#block-side)"/>
+      <rect x="198" y="240" width="116" height="70" fill="url(#block-front)" stroke="#507461" stroke-opacity=".34" stroke-width="1"/>
       <path d="M198 240H314L330 228" fill="none" stroke="#6d8978" stroke-opacity="0.45" stroke-width="1.5"/>
     </g>
     <g id="cube-bottom">
       <path d="M198 310L214 298H330L314 310Z" fill="#355444"/>
-      <path d="M314 310L330 298V368L314 380Z" fill="#050d09"/>
-      <rect x="198" y="310" width="116" height="70" rx="2" fill="#0c1812"/>
+      <path d="M314 310L330 298V368L314 380Z" fill="url(#block-side)"/>
+      <rect x="198" y="310" width="116" height="70" fill="url(#block-front)" stroke="#507461" stroke-opacity=".34" stroke-width="1"/>
       <path d="M198 310H314L330 298" fill="none" stroke="#6d8978" stroke-opacity="0.45" stroke-width="1.5"/>
     </g>
   </g>
