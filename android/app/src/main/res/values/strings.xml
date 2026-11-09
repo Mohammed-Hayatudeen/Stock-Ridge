@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">StockRidge</string>
     <!-- Replace this with the client's Worker before building their APK. -->
-    <string name="stockridge_origin">https://beta.stockridge.workers.dev</string>
+    <string name="stockridge_origin">https://beta.pharma10.workers.dev</string>
 </resources>
