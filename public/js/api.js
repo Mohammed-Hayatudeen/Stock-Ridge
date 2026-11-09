@@ -555,7 +555,10 @@
     const out = await request('POST', '/api/auth/login', {
       body: { username, pin, remember: Boolean(remember), deviceId: device && device.id && device.id !== 'SR-UNKNOWN' ? device.id : undefined },
       queue: false,
-      timeoutMs: 8000,
+      // Cold Workers, PBKDF2, session creation and audit writes share this one
+      // response. Eight seconds aborted valid sign-ins on otherwise healthy
+      // deployments. Keep one attempt: never blindly repeat a login mutation.
+      timeoutMs: 45000,
     });
     if (out.token) setToken(out.token, { remember: Boolean(remember) });
     return out;
