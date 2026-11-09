@@ -29,7 +29,7 @@
     <path d="M124 376L166 310L198 238L226 180L256 96L286 180L314 238L346 310L388 376" fill="none" stroke="#c5f4d8" stroke-opacity="0.24" stroke-width="2" stroke-linejoin="round"/>
   </g>
 
-  <g id="stacked-blocks" stroke-linejoin="round">
+  <g id="stacked-blocks" stroke-linejoin="round" transform="translate(-64 46) scale(1.25 .8)">
     <g id="cube-top">
       <path d="M198 170L214 158H330L314 170Z" fill="#355444"/>
       <path d="M314 170L330 158V228L314 240Z" fill="#050d09"/>
