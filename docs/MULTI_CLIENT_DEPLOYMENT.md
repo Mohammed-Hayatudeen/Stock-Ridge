@@ -320,7 +320,22 @@ Electron uses encrypted device-local SQLite for offline data but still sends rem
 
 ## 15. Build and distribute Android separately
 
-Set `ANDROID_HOME` or create ignored `android/local.properties` with the SDK path. Set the Worker origin in `android/app/src/main/res/values/strings.xml` before building.
+Set `ANDROID_HOME` and `ANDROID_SDK_ROOT`, or create ignored `android/local.properties`. On Windows with the standard SDK location:
+
+```powershell
+$sdk = "$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_HOME = $sdk
+$env:ANDROID_SDK_ROOT = $sdk
+Test-Path "$sdk\platforms\android-35"
+Test-Path "$sdk\build-tools\35.0.0"
+Test-Path "$sdk\platform-tools\adb.exe"
+"sdk.dir=$($sdk -replace '\\', '/')" | Set-Content .\android\local.properties -Encoding ascii
+git check-ignore .\android\local.properties
+```
+
+All three `Test-Path` checks must be `True`; `git check-ignore` must print the local-properties path. If Android Studio uses another SDK location, use that path instead. Never commit this machine-specific file.
+
+Set the Worker origin in `android/app/src/main/res/values/strings.xml` before building.
 
 ```powershell
 npm ci
@@ -346,7 +361,19 @@ Release APK:
 npm run android:build:release
 ```
 
+Release output:
+
+```text
+android\app\build\outputs\apk\release\app-release.apk
+```
+
+The Windows npm launcher invokes `cmd /c` with the quoted wrapper and Gradle task as separate verbatim arguments. Checkout paths containing spaces are supported. A direct fallback from the `android` directory is `.\gradlew.bat assembleRelease`.
+
 Configure private Android signing before release distribution; never commit the keystore or passwords. Open the installed app and verify the selected Worker, login, sync, offline recovery, and hardware workflows.
+
+### Verified Windows build evidence
+
+On 2026-11-09, the operator's Windows terminal confirmed Electron packaging at `dist\win-unpacked\StockRidge.exe` and Android `assembleRelease` completed **`BUILD SUCCESSFUL`** in 1m 9s with 42 actionable tasks. This proves packaging only. APK installation, opened-app behavior, and physical offline/hardware checks remain separate acceptance steps. Java deprecation notes and SDK XML version warnings did not block that build.
 
 ## 16. First-client acceptance checklist
 

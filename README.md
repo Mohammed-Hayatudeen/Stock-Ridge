@@ -117,7 +117,19 @@ To bake a particular Worker origin into an artifact, set `STOCKRIDGE_ORIGIN` bef
 
 ## Android builds
 
-Prerequisites: JDK 17, Android SDK Platform 35, Android Build Tools 35.0.0, and accepted SDK licences. Set `ANDROID_HOME` (or create the ignored `android/local.properties` with `sdk.dir=...`). Edit `android/app/src/main/res/values/strings.xml` to select the Worker origin before building.
+Prerequisites: JDK 17, Android SDK Platform 35, Android Build Tools 35.0.0, and accepted SDK licences. Set `ANDROID_HOME` and `ANDROID_SDK_ROOT`, or create ignored `android/local.properties` with `sdk.dir=...`; forward slashes work in Windows paths. Edit `android/app/src/main/res/values/strings.xml` to select the Worker origin before building.
+
+On Windows with the standard SDK location:
+
+```powershell
+$sdk = "$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_HOME = $sdk
+$env:ANDROID_SDK_ROOT = $sdk
+"sdk.dir=$($sdk -replace '\\', '/')" | Set-Content .\android\local.properties -Encoding ascii
+git check-ignore .\android\local.properties
+```
+
+The Windows launcher preserves checkout paths containing spaces. If needed, the direct equivalent is `cd android; .\gradlew.bat assembleDebug` (or `assembleRelease`).
 
 Debug APK, on macOS/Linux or Windows with Node available:
 
