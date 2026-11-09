@@ -103,6 +103,4 @@ jobs:
           printf '%s\n' "$response"
           printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.ok)process.exit(1)})"
 
-      - name: Retire stockridge0 after beta readiness
-        run: npx wrangler delete --name stockridge0 --force
 
