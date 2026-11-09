@@ -32,7 +32,7 @@ armInstallStrip();
 document.addEventListener('DOMContentLoaded', armInstallStrip);
 
 const METHODS = [
-  'putMany', 'all', 'get', 'remove', 'clearTable', 'clearAll', 'tableStats',
+  'changedOnly', 'putMany', 'all', 'get', 'remove', 'clearTable', 'clearAll', 'tableStats',
   'outboxPut', 'outboxGet', 'outboxAll', 'pending', 'outboxCount', 'outboxUpdate', 'outboxDelete',
   'markFailed', 'markSynced', 'purgeSynced', 'requeue',
   'metaGet', 'metaSet', 'metaAll',

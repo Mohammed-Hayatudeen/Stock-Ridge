@@ -898,6 +898,9 @@
   }
 
   async function changedOnly(table, rows) {
+    if (SR.store && typeof SR.store.changedOnly === 'function') {
+      return SR.store.changedOnly(table, rows).catch(() => rows);
+    }
     const out = [];
     for (const row of rows || []) {
       if (!row || row.id == null) continue;

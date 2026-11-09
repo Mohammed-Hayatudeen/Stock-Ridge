@@ -17,7 +17,7 @@ const { HIDE_INSTALL_CSS } = require('./hide-install');
 const { SHARED_DATABASE, PWA_ORIGIN, OFFICE_ORIGIN } = require('../lib/shared-books');
 
 const METHODS = new Set([
-  'putMany', 'all', 'get', 'remove', 'clearTable', 'clearAll', 'tableStats',
+  'changedOnly', 'putMany', 'all', 'get', 'remove', 'clearTable', 'clearAll', 'tableStats',
   'outboxPut', 'outboxGet', 'outboxAll', 'pending', 'outboxCount', 'outboxUpdate', 'outboxDelete',
   'markFailed', 'markSynced', 'purgeSynced', 'requeue',
   'metaGet', 'metaSet', 'metaAll',

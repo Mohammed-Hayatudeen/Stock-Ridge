@@ -97,6 +97,14 @@
     return native.get(table, id);
   }
 
+  async function changedOnly(table, rows) {
+    await ready();
+    if (typeof native.changedOnly === 'function') {
+      return native.changedOnly(table, rows);
+    }
+    return rows;
+  }
+
   async function putMany(table, rows) {
     await ready();
     const list = (rows || []).filter((row) => row && row.id != null).map(stripSecrets);
@@ -184,6 +192,7 @@
     DB_VERSION: 1,
     OUTBOX_CAP: idb.OUTBOX_CAP,
     open,
+    changedOnly,
     putMany,
     all,
     first: async (table, predicate) => (await all(table)).find(predicate) || null,
