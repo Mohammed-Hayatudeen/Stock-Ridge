@@ -31,7 +31,7 @@
     "electron:build:mac": "npm run check && npm run electron:stage && electron-builder --mac zip dmg",
     "android:build": "npm run check && node tools/android-build.js debug",
     "android:build:release": "npm run check && node tools/android-build.js release",
-    "android:install": "npm run android:build && adb install -r android/app/build/outputs/apk/debug/app-debug.apk"
+    "android:install": "npm run android:build && node tools/adb-run.js install -r android/app/build/outputs/apk/debug/app-debug.apk"
   },
   "engines": {
     "node": ">=22.12.0"
