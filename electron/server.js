@@ -32,9 +32,9 @@ const HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-au
 // One host can hold its serialized paths for 30 seconds; two hosts fit inside
 // this envelope. Keep five seconds inside the renderer's 70-second wait, and
 // put a hard stop on a response body that trickles past its idle timeout.
-const LOGIN_PROXY_WAIT_MS = 80000;
-const LOGIN_HOST_WAIT_MS = 45000;
-const LOGIN_ATTEMPT_WAIT_MS = 45000;
+const LOGIN_PROXY_WAIT_MS = 85000;
+const LOGIN_HOST_WAIT_MS = 80000;
+const LOGIN_ATTEMPT_WAIT_MS = 80000;
 
 function publicDir(root) {
   return path.resolve(root, 'public');
@@ -288,7 +288,7 @@ function chooseStaticFile(bundledExists, cachedExists) {
   return null;
 }
 
-function nodeUpstream(target, transport, url, method, headers, body, { family = undefined, rejectUnauthorized = true, timeout = 45000, signal = null } = {}) {
+function nodeUpstream(target, transport, url, method, headers, body, { family = undefined, rejectUnauthorized = true, timeout = 80000, signal = null } = {}) {
   return new Promise((resolve, reject) => {
     const options = {
       protocol: target.protocol,
@@ -335,7 +335,7 @@ function nodeUpstream(target, transport, url, method, headers, body, { family = 
   });
 }
 
-function netUpstream(target, url, method, headers, body, { timeout = 45000, signal = null } = {}) {
+function netUpstream(target, url, method, headers, body, { timeout = 80000, signal = null } = {}) {
   const electron = electronNet();
   if (!electron) return Promise.reject(new Error('Chromium network is not available.'));
   return new Promise((resolve, reject) => {
@@ -638,7 +638,7 @@ function readBudgets(urlPath, method) {
   // batched by the Worker; this envelope lets that real answer finish inside
   // the view's 25-second wait instead of abandoning it at the health-read 4.5s.
   if (path.split('?')[0] === '/api/dashboard') {
-    return { v4: 45000, node: 0, insecure: 4000, net: 0, sibling: 10000, catalogue: false, once: false };
+    return { v4: 80000, node: 0, insecure: 4000, net: 0, sibling: 10000, catalogue: false, once: false };
   }
   // Settings includes the owner's plan-usage counts, and its first visit also
   // loads the branding record. Keep these ordinary GETs bounded, but give the
@@ -653,9 +653,9 @@ function readBudgets(urlPath, method) {
     return { v4: 10000, node: 0, insecure: 4000, net: 0, sibling: 5000, catalogue: false, once: false };
   }
   if (isOneShotWrite(method, path)) {
-    return { v4: 45000, node: 0, insecure: 0, net: 0, sibling: 0, catalogue: false, once: true };
+    return { v4: 80000, node: 0, insecure: 0, net: 0, sibling: 0, catalogue: false, once: true };
   }
-  return { v4: 45000, node: 3500, insecure: 3500, net: 3500, sibling: 4000, catalogue: false, once: false };
+  return { v4: 80000, node: 3500, insecure: 3500, net: 3500, sibling: 4000, catalogue: false, once: false };
 }
 
 async function askShopRead(hostTarget, hostTransport, url, method, pageHeaders, nodeHeaders, body, deviceId) {

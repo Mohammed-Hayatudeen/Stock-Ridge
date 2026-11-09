@@ -4,7 +4,7 @@
 (function (global) {
   // The proxy's two serialized hosts can use 60 seconds, with a 65-second
   // hard cap. Do not abandon a valid fallback answer at the old 40 seconds.
-  const LOGIN_WINDOW_WAIT_MS = 70000;
+  const LOGIN_WINDOW_WAIT_MS = 85000;
 
   function desktopFetchPolicy(input, init, url, api) {
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
