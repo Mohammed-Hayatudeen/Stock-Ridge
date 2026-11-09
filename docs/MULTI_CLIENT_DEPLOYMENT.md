@@ -79,6 +79,38 @@ Record identifiers, not secrets:
 
 Keep Cloudflare tokens, Turso tokens, JWT secrets, signing keys, and real-user PINs in approved secret storage—not in this register or Git.
 
+### Multiple GitHub accounts on one Windows computer
+
+Use a distinct existing GitHub identity for each client repository. HTTPS credential managers can select accounts per remote; SSH users can instead maintain separate host aliases. Never overwrite an existing key or change another account's configuration.
+
+For SSH, create/register a client-specific key through the client's approved GitHub process, then add an entry to `$HOME\.ssh\config`:
+
+```sshconfig
+Host github-northline
+    HostName github.com
+    User git
+    IdentityFile C:/Users/YourName/.ssh/id_ed25519_github_northline
+    IdentitiesOnly yes
+```
+
+Use that alias only in the matching client checkout:
+
+```powershell
+git remote set-url origin git@github-northline:northline-org/stockridge.git
+ssh -T github-northline
+git remote -v
+```
+
+Expected: GitHub identifies the intended account. Keep private keys out of the repository and never print them. GitHub CLI authentication (`gh auth status`) is separate from Git SSH authentication; success in one does not prove the other. If organization SSO applies, authorize the key/credential for that organization.
+
+Add the SSH alias or HTTPS account label to the deployment register. Stop if authentication resolves to another client's account.
+
+### One client database, three application surfaces
+
+For each client, the PWA, Electron application, and Android application all use that client's **same Worker and Turso database**. Electron's local SQLite is an encrypted offline store/queue, not a second cloud ledger. Android is a WebView around the Worker and does not open Electron's SQLite file.
+
+Do not create separate Turso databases for the phone and desktop, and never place Turso tokens in Electron or Android. Different staff can use the three surfaces concurrently; account/session behavior still follows the application's authentication rules.
+
 ## 6. Install and verify the source
 
 From the client checkout root:
@@ -127,6 +159,17 @@ Use the client's own Worker name and Turso URL. The top-level configuration is p
 The `sample` environment belongs to the existing demonstration structure. Do not reuse it for an unrelated client.
 
 ## 8. Configure credentials safely
+
+Before deployment, verify both identity and target:
+
+```powershell
+git remote -v
+gh auth status
+npx wrangler whoami --config worker/wrangler.toml
+Select-String -Path .\worker\wrangler.toml -Pattern '^name =|TURSO_DATABASE_URL'
+```
+
+`gh auth status` is optional when GitHub CLI is not used. Compare every result with the client register. Cloudflare authentication must belong to the intended client account, not merely the last account used on the workstation.
 
 ### Local operator terminal
 
