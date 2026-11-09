@@ -74,13 +74,13 @@ jobs:
       - run: npx wrangler deploy --dry-run --env "" --config worker/wrangler.toml --outdir .cache/worker-dry-run
       - run: npm run worker:deploy
 
-      - name: Attach stockridge0 explicitly to workers.dev
+      - name: Attach beta explicitly to workers.dev
         run: |
           response="$(curl --fail --silent --show-error --request POST \
             --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             --header "Content-Type: application/json" \
             --data '{"enabled":true}' \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/stockridge0/subdomain")"
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/beta/subdomain")"
           printf '%s\n' "$response"
           printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.success||!r.result||r.result.enabled!==true)process.exit(1)})"
 
@@ -91,15 +91,18 @@ jobs:
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain")"
           printf '%s\n' "$account"
           host="$(printf '%s' "$account" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).result.subdomain))")"
-          printf '::notice::Cloudflare Workers subdomain is %s; stockridge0 URL is https://stockridge0.%s.workers.dev\n' "$host" "$host"
+          printf '::notice::Cloudflare Workers subdomain is %s; beta URL is https://beta.%s.workers.dev\n' "$host" "$host"
           curl --fail --silent --show-error \
             --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/stockridge0/subdomain"
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/beta/subdomain"
           printf '\n'
 
       - name: Verify deployed readiness
         run: |
-          response="$(curl --fail --silent --show-error --retry 24 --retry-all-errors --retry-delay 5 https://stockridge0.pharma10.workers.dev/api/diagnose)"
+          response="$(curl --fail --silent --show-error --retry 24 --retry-all-errors --retry-delay 5 https://beta.stockride0.workers.dev/api/diagnose)"
           printf '%s\n' "$response"
           printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.ok)process.exit(1)})"
+
+      - name: Retire stockridge0 after beta readiness
+        run: npx wrangler delete --name stockridge0 --force
 
