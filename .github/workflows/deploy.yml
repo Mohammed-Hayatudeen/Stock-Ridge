@@ -71,11 +71,6 @@ jobs:
           printf '%s' "$TURSO_AUTH_TOKEN" | npx wrangler secret put TURSO_AUTH_TOKEN --env "" --config worker/wrangler.toml
           printf '%s' "$JWT_SECRET" | npx wrangler secret put JWT_SECRET --env "" --config worker/wrangler.toml
 
-      - name: One-time removal of legacy Workers
-        if: hashFiles('remove-legacy-worker.txt') != ''
-        run: |
-          test "$(cat remove-legacy-worker.txt)" = "DELETE_STOCKRIDGE_WORKER"
-          npx wrangler delete --name sample --force
       - run: npx wrangler deploy --dry-run --env "" --config worker/wrangler.toml --outdir .cache/worker-dry-run
       - run: npm run worker:deploy
 
