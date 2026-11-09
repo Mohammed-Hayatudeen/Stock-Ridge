@@ -1123,7 +1123,7 @@
         const logoBox = tagItem(ui.h('div', { class: 'span-2' }), 'logo shop mark sign-in image');
         logoBox.appendChild(ui.h('div', { class: 'ctl' }, 'Logo'));
         const preview = ui.h('img', { alt: 'The current logo', class: 'brand-logo-preview' });
-        const fallback = (b.defaultLogoUrl && String(b.defaultLogoUrl).indexOf('/brand/mark') === 0) ? b.defaultLogoUrl : '/brand/mark.svg';
+        const fallback = (b.defaultLogoUrl && String(b.defaultLogoUrl).indexOf('/brand/logo.jpg') === 0) ? b.defaultLogoUrl : '/brand/logo.jpg';
         const fallbackSrc = SR.BUILD && fallback.indexOf('v=') < 0 ? fallback + '?v=' + SR.BUILD : fallback;
         preview.src = b.logoDataUrl || fallbackSrc;
         const file = ui.h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', disabled: !canEdit, class: 'brand-logo-input' });
