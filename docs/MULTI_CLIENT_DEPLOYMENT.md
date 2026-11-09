@@ -8,7 +8,7 @@ Operational guide for deploying **isolated StockRidge installations for differen
 
 A single installation may contain many businesses and branches belonging to that client. Different clients must not share a Worker, Turso database, JWT secret, authentication token, backup, or offline demonstration accounts.
 
-The demonstration installation at `https://beta.stockride0.workers.dev` is not a template database for a new client. Never point a client at its Turso URL.
+The demonstration installation at `https://beta.stockridge0.workers.dev` is not a template database for a new client. Never point a client at its Turso URL.
 
 ## 2. Current architecture
 
