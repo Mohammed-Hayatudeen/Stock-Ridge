@@ -33,4 +33,4 @@ printf '%s' "$TURSO_AUTH_TOKEN" | npx wrangler secret put TURSO_AUTH_TOKEN --env
 printf '%s' "$JWT_SECRET" | npx wrangler secret put JWT_SECRET --env "" --config worker/wrangler.toml
 npx wrangler deploy --dry-run --env "" --config worker/wrangler.toml --outdir .cache/worker-dry-run
 npm run worker:deploy
-curl --fail --silent --show-error https://beta.stockridge0.workers.dev/api/diagnose
+curl --fail --silent --show-error https://stockridge0.pharma10.workers.dev/api/diagnose

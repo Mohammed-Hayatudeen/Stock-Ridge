@@ -121,7 +121,7 @@ function startServer({ root, origin, fallbackOrigin = null, cacheRoot = null, ho
   if (!fs.existsSync(path.join(publicDir(root), 'index.html'))) {
     throw new Error(`No StockRidge UI at ${publicDir(root)}. Set STOCKRIDGE_ROOT to the checkout.`);
   }
-  const target = new URL(origin || 'https://beta.stockridge0.workers.dev');
+  const target = new URL(origin || 'https://stockridge0.pharma10.workers.dev');
   const transport = target.protocol === 'http:' ? http : https;
   const fallback = fallbackOrigin ? new URL(fallbackOrigin) : null;
 
