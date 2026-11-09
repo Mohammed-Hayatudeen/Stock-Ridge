@@ -51,12 +51,13 @@ test('Android launcher supports Windows batch files and release tasks', () => {
   const windows = gradleInvocation({ platform: 'win32', root: 'C:\\Users\\Test\\Stock-Ridge', wrapperExists: () => true });
   assert.match(windows.command, /cmd\.exe$/i);
   assert.deepEqual(windows.args.slice(0, 3), ['/d', '/s', '/c']);
-  assert.match(windows.args[3], /gradlew\.bat$/);
-  assert.match(windows.args[3], /Stock-Ridge/);
-  assert.equal(windows.args[4], 'assembleDebug');
+  assert.equal(windows.args[3], '""C:\\Users\\Test\\Stock-Ridge\\android\\gradlew.bat" assembleDebug');
+  assert.equal(windows.args.length, 4);
   assert.equal(windows.options.shell, false);
   const spaced = gradleInvocation({ platform: 'win32', root: 'C:\\Users\\Test User\\Stock Ridge', wrapperExists: () => true });
-  assert.equal(spaced.args[3], 'C:\\Users\\Test User\\Stock Ridge\\android\\gradlew.bat');
+  assert.equal(spaced.args[3], '""C:\\Users\\Test User\\Stock Ridge\\android\\gradlew.bat" assembleDebug');
+  const windowsRelease = gradleInvocation({ platform: 'win32', root: 'C:\\Users\\Test User\\Stock Ridge', release: true, wrapperExists: () => true });
+  assert.match(windowsRelease.args[3], /" assembleRelease$/);
   const linuxRelease = gradleInvocation({ platform: 'linux', release: true });
   assert.deepEqual(linuxRelease.args, ['assembleRelease']);
   assert.equal(linuxRelease.options.shell, false);
