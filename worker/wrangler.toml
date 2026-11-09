@@ -1,5 +1,5 @@
 # StockRidge's only cloud runtime: one Worker, shared routes, Turso and the PWA.
-name = "stockridge"
+name = "beta"
 main = "src/index.mjs"
 compatibility_date = "2026-11-01"
 compatibility_flags = ["nodejs_compat"]

@@ -76,6 +76,6 @@ jobs:
 
       - name: Verify deployed readiness
         run: |
-          response="$(curl --fail --silent --show-error https://stockridge.stockridge.workers.dev/api/diagnose)"
+          response="$(curl --fail --silent --show-error https://beta.stockridge.workers.dev/api/diagnose)"
           printf '%s\n' "$response"
           printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.ok)process.exit(1)})"
