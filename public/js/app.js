@@ -1985,6 +1985,7 @@
     }
 
     submit.disabled = true;
+    submit.classList.add('is-busy');
     submit.textContent = 'Signing in…';
     try {
       // A phone with no network must not wait on a dead sign-in and then say
@@ -2124,6 +2125,7 @@
       pinEl.select();
     } finally {
       submit.disabled = false;
+      submit.classList.remove('is-busy');
       submit.textContent = 'Sign in';
       updateNetChrome();
     }

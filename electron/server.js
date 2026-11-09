@@ -32,9 +32,9 @@ const HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-au
 // One host can hold its serialized paths for 30 seconds; two hosts fit inside
 // this envelope. Keep five seconds inside the renderer's 70-second wait, and
 // put a hard stop on a response body that trickles past its idle timeout.
-const LOGIN_PROXY_WAIT_MS = 65000;
-const LOGIN_HOST_WAIT_MS = 30000;
-const LOGIN_ATTEMPT_WAIT_MS = 20000;
+const LOGIN_PROXY_WAIT_MS = 80000;
+const LOGIN_HOST_WAIT_MS = 45000;
+const LOGIN_ATTEMPT_WAIT_MS = 45000;
 
 function publicDir(root) {
   return path.resolve(root, 'public');
@@ -567,20 +567,13 @@ async function loginUpstream(target, transport, url, method, pageHeaders, nodeHe
   // that trickles bytes must not hold primary until the sibling has no time.
   const hostTimer = setTimeout(() => hostControl.abort(), LOGIN_HOST_WAIT_MS);
   const timeout = (cap) => Math.max(1, Math.min(cap, LOGIN_ATTEMPT_WAIT_MS, hostDeadline - Date.now()));
-  const tries = [];
-  if (target.protocol === 'https:' && electronNet()) {
-    tries.push(() => netUpstream(target, url, method, pageHeaders, body, { timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal }));
-  }
-  tries.push(() => nodeUpstream(target, transport, url, method, nodeHeaders, body, { timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal }));
-  tries.push(() => nodeUpstream(target, transport, url, method, nodeHeaders, body, { family: 4, timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal }));
-  if (target.protocol === 'https:') {
-    tries.push(() => nodeUpstream(target, transport, url, method, nodeHeaders, body, {
-      family: 4,
-      rejectUnauthorized: false,
-      timeout: timeout(6000),
-      signal: hostSignal,
-    }));
-  }
+  
+  // Keep one attempt: never blindly repeat a login mutation across Chromium/Node
+  // network stacks if it times out. A slow worker must not be hammered.
+  const tries = [
+    () => nodeUpstream(target, transport, url, method, nodeHeaders, body, { family: 4, timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal })
+  ];
+
   try {
     for (const attempt of tries) {
       // An aborted window must not leave another login running. Nor may a dead
