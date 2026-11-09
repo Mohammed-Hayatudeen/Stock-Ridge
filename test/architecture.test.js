@@ -54,6 +54,7 @@ test('Android launcher supports Windows batch files and release tasks', () => {
   assert.equal(windows.args[3], '""C:\\Users\\Test\\Stock-Ridge\\android\\gradlew.bat" assembleDebug');
   assert.equal(windows.args.length, 4);
   assert.equal(windows.options.shell, false);
+  assert.equal(windows.options.windowsVerbatimArguments, true);
   const spaced = gradleInvocation({ platform: 'win32', root: 'C:\\Users\\Test User\\Stock Ridge', wrapperExists: () => true });
   assert.equal(spaced.args[3], '""C:\\Users\\Test User\\Stock Ridge\\android\\gradlew.bat" assembleDebug');
   const windowsRelease = gradleInvocation({ platform: 'win32', root: 'C:\\Users\\Test User\\Stock Ridge', release: true, wrapperExists: () => true });

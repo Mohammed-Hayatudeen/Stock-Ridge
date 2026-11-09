@@ -21,6 +21,8 @@ function gradleInvocation({ platform = process.platform, root = path.resolve(__d
       cwd: android,
       stdio: 'inherit',
       shell: false,
+      // Preserve the explicit cmd /s /c quoting instead of letting Node quote it again.
+      windowsVerbatimArguments: windows,
     },
   };
 }
