@@ -13,13 +13,13 @@
       <stop offset="1" stop-color="#269761"/>
     </linearGradient>
     <linearGradient id="block-front" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#13271d"/>
-      <stop offset="0.55" stop-color="#0a1911"/>
-      <stop offset="1" stop-color="#06110b"/>
+      <stop offset="0" stop-color="#111111"/>
+      <stop offset="0.55" stop-color="#0a0a0a"/>
+      <stop offset="1" stop-color="#000000"/>
     </linearGradient>
     <linearGradient id="block-side" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#09150e"/>
-      <stop offset="1" stop-color="#020805"/>
+      <stop offset="0" stop-color="#080808"/>
+      <stop offset="1" stop-color="#000000"/>
     </linearGradient>
   </defs>
 
@@ -35,11 +35,11 @@
 
   <g id="stacked-blocks" stroke-linejoin="round">
     <path d="M370 166L382 172V376H370Z" fill="url(#block-side)"/>
-    <rect x="160" y="166" width="210" height="210" fill="url(#block-front)" stroke="#507461" stroke-opacity=".5" stroke-width="2"/>
+    <rect x="160" y="166" width="210" height="210" fill="url(#block-front)" stroke="#333333" stroke-opacity=".5" stroke-width="2"/>
     <path id="cube-top" d="M160 166H370V236H160Z" fill="none"/>
     <path id="cube-middle" d="M160 236H370V306H160Z" fill="none"/>
     <path id="cube-bottom" d="M160 306H370V376H160Z" fill="none"/>
-    <path d="M160 236H370M160 306H370" fill="none" stroke="#507461" stroke-opacity=".55" stroke-width="2"/>
-    <path d="M160 166H370" fill="none" stroke="#a1c8af" stroke-opacity=".65" stroke-width="2"/>
+    <path d="M160 236H370M160 306H370" fill="none" stroke="#222222" stroke-opacity=".55" stroke-width="2"/>
+    <path d="M160 166H370" fill="none" stroke="#444444" stroke-opacity=".65" stroke-width="2"/>
   </g>
 </svg>
