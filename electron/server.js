@@ -568,11 +568,12 @@ async function loginUpstream(target, transport, url, method, pageHeaders, nodeHe
   const hostTimer = setTimeout(() => hostControl.abort(), LOGIN_HOST_WAIT_MS);
   const timeout = (cap) => Math.max(1, Math.min(cap, LOGIN_ATTEMPT_WAIT_MS, hostDeadline - Date.now()));
   
-  // Keep one attempt: never blindly repeat a login mutation across Chromium/Node
-  // network stacks if it times out. A slow worker must not be hammered.
-  const tries = [
-    () => nodeUpstream(target, transport, url, method, nodeHeaders, body, { family: 4, timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal })
-  ];
+  const tries = [];
+  if (target.protocol === 'https:' && electronNet()) {
+    tries.push(() => netUpstream(target, url, method, pageHeaders, body, { timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal }));
+  }
+  tries.push(() => nodeUpstream(target, transport, url, method, nodeHeaders, body, { timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal }));
+  tries.push(() => nodeUpstream(target, transport, url, method, nodeHeaders, body, { family: 4, timeout: timeout(LOGIN_ATTEMPT_WAIT_MS), signal: hostSignal }));
 
   try {
     for (const attempt of tries) {
@@ -585,7 +586,12 @@ async function loginUpstream(target, transport, url, method, pageHeaders, nodeHe
         if (upstream) return upstream;
         const deferred = deferredLoginAnswer(plain);
         if (deferred && typeof onDeferredAnswer === 'function') onDeferredAnswer(deferred);
-      } catch (err) { /* this path did not answer a login */ }
+      } catch (err) {
+        // If the server was reachable but simply didn't finish the login in
+        // time (e.g. slow cold-start hashing), do not hammer it with a retry
+        // on another network stack. Only retry on instant connection failures.
+        if (err && err.message === 'The Worker did not answer in time.') break;
+      }
     }
     return null;
   } finally {
