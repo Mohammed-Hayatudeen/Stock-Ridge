@@ -364,10 +364,11 @@
         ejectToOutbox(method, path, options.body, { idempotencyKey: options.idempotencyKey, label: options.headers && options.headers['X-Queue-Label'] });
         return { queued: true, ok: true, offline: false, path };
       }
-      throw new ApiError('The shop is up, but this screen did not load. Try again.', {
-        status: 503,
-        code: 'SHOP_READ_FAILED',
-        retryable: false,
+      const reason = String((err && err.message) || 'The request did not complete.');
+      throw new ApiError(`The shop answered, but this screen’s request failed: ${reason}`, {
+        status: Number(err && err.status) || 503,
+        code: (err && err.code) || 'SHOP_READ_FAILED',
+        retryable: true,
       });
     }
     const marked = markOfflineNow();

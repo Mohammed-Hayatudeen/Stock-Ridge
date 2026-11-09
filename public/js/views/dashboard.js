@@ -148,8 +148,10 @@
           data = await fromMirror().catch(() => null);
           retryWhenCopyEnds();
         } else if (knownUp && err && err.code === 'SHOP_READ_FAILED') {
-          body.replaceChildren(ui.errorBlock(err, { retry: { label: 'Try again', run: refresh } }));
-          return;
+          offline = true;
+          data = await fromMirror().catch(() => null);
+          if (!data) body.replaceChildren(ui.errorBlock(err, { retry: { label: 'Try again', run: refresh } }));
+          if (!data) return;
         } else if (knownUp && !shopMiss(err)) {
           body.replaceChildren(ui.errorBlock(err, { retry: { label: 'Try again', run: refresh } }));
           return;
@@ -195,10 +197,9 @@
       }
       // Saved figures are not an offline banner while the shop has answered,
       // and not while the till is still copying them.
-      if (offline && !catchingUp && SR.api.shopConfirmed && SR.api.shopConfirmed()) {
-        body.replaceChildren(ui.errorBlock(error || new Error('The shop is up, but this screen did not load. Try again.'), { retry: { label: 'Try again', run: refresh } }));
-        return;
-      }
+      // A reachable Worker does not make saved figures unusable. If the live
+      // dashboard request failed, keep the last good position visible and mark
+      // it offline rather than replacing the whole till with a dead-end panel.
       paint(body, data, { offline: offline && !catchingUp, catchingUp, changeOwed });
     }
 

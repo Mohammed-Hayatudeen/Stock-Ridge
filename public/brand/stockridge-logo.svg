@@ -29,28 +29,17 @@
   <g id="ridges">
     <path id="left-ridge" d="M64 376L92 326L116 268L148 144L174 242L198 300L224 376Z" fill="#1d6847"/>
     <path id="right-ridge" d="M288 376L316 300L340 238L366 154L392 252L420 314L448 376Z" fill="#155237"/>
-    <path id="middle-ridge" d="M108 376L132 286L154 202L184 142L218 110L256 96L294 110L328 142L358 202L380 286L404 376Z" fill="url(#ridge-center)"/>
-    <path d="M108 376L132 286L154 202L184 142L218 110L256 96L294 110L328 142L358 202L380 286L404 376" fill="none" stroke="#c5f4d8" stroke-opacity="0.24" stroke-width="2" stroke-linejoin="round"/>
+    <path id="middle-ridge" d="M108 376L256 96L404 376Z" fill="url(#ridge-center)"/>
+    <path d="M108 376L256 96L404 376" fill="none" stroke="#c5f4d8" stroke-opacity="0.24" stroke-width="2" stroke-linejoin="round"/>
   </g>
 
-  <g id="stacked-blocks" stroke-linejoin="round" transform="translate(-64 0) scale(1.25 .98947)">
-    <g id="cube-top">
-      <path d="M198 170L214 158H330L314 170Z" fill="#355444"/>
-      <path d="M314 170L330 158V228L314 240Z" fill="url(#block-side)"/>
-      <rect x="198" y="170" width="116" height="70" fill="url(#block-front)" stroke="#507461" stroke-opacity=".34" stroke-width="1"/>
-      <path d="M198 170H314L330 158" fill="none" stroke="#6d8978" stroke-opacity="0.45" stroke-width="1.5"/>
-    </g>
-    <g id="cube-middle">
-      <path d="M198 240L214 228H330L314 240Z" fill="#355444"/>
-      <path d="M314 240L330 228V298L314 310Z" fill="url(#block-side)"/>
-      <rect x="198" y="240" width="116" height="70" fill="url(#block-front)" stroke="#507461" stroke-opacity=".34" stroke-width="1"/>
-      <path d="M198 240H314L330 228" fill="none" stroke="#6d8978" stroke-opacity="0.45" stroke-width="1.5"/>
-    </g>
-    <g id="cube-bottom">
-      <path d="M198 310L214 298H330L314 310Z" fill="#355444"/>
-      <path d="M314 310L330 298V368L314 380Z" fill="url(#block-side)"/>
-      <rect x="198" y="310" width="116" height="70" fill="url(#block-front)" stroke="#507461" stroke-opacity=".34" stroke-width="1"/>
-      <path d="M198 310H314L330 298" fill="none" stroke="#6d8978" stroke-opacity="0.45" stroke-width="1.5"/>
-    </g>
+  <g id="stacked-blocks" stroke-linejoin="round">
+    <path d="M370 166L382 172V376H370Z" fill="url(#block-side)"/>
+    <rect x="160" y="166" width="210" height="210" fill="url(#block-front)" stroke="#507461" stroke-opacity=".5" stroke-width="2"/>
+    <path id="cube-top" d="M160 166H370V236H160Z" fill="none"/>
+    <path id="cube-middle" d="M160 236H370V306H160Z" fill="none"/>
+    <path id="cube-bottom" d="M160 306H370V376H160Z" fill="none"/>
+    <path d="M160 236H370M160 306H370" fill="none" stroke="#507461" stroke-opacity=".55" stroke-width="2"/>
+    <path d="M160 166H370" fill="none" stroke="#a1c8af" stroke-opacity=".65" stroke-width="2"/>
   </g>
 </svg>
