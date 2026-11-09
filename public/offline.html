@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>StockRidge — no connection</title>
+<meta name="theme-color" content="#07290c">
+<!--
+  =====================================================================
+  public/offline.html — WHAT A SHOP SEES WHEN THE NETWORK IS GONE
+  =====================================================================
+  This page has ONE job and it is not to apologise. In a Nigerian market the
+  network drops several times a day, and the person looking at this screen is
+  standing at a counter with a customer in front of them. The questions they need
+  answered, in order, are:
+
+    1. Did I lose the sale I just took?          → "No. It is on this device."
+    2. Can I keep selling?                       → "Yes."
+    3. When will this fix itself?                → "By itself, when the network
+                                                    returns. You do not have to
+                                                    do anything."
+
+  So the page answers those three and nothing else. It is deliberately NOT the
+  app shell: the shell needs 20 JavaScript files, and if any of them failed to
+  cache the customer is left with a blank white screen and no explanation. This
+  file is one page with its own styles inline and no requests at all — it renders
+  even when nothing else will.
+
+  IT MUST NOT DEPEND ON ANYTHING. No external CSS, no fonts, no images, no icons
+  fetched over the network. The only decoration is the logo, inlined as a data URI, because a
+  network that has just failed is exactly the wrong time to ask it for a picture.
+
+  It is precached by sw.js and served as the navigation fallback when a fetch
+  fails, which is why the id below matters: `audit.http.js` fetches this page and
+  asserts it is a page, says it is offline, and contains no "undefined".
+  =====================================================================
+-->
+<style>
+  :root {
+    --ink: #14201f; --ink-500: #5b6b69; --line: #d8e0df;
+    --surface: #ffffff; --bg: #f5f8f7; --teal: #0d5a22; --teal-050: #eef8f1;
+    --amber-050: #fffbeb; --amber-line: #fcd34d; --amber-800: #92400e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e8f1f0; --ink-500: #9db0ae; --line: #2a3a38; --surface: #14201f; --bg: #0b1413; --teal: #3dcc5e; --teal-050: #0c2412; --amber-050: #241a06; --amber-line: #7c5a11; --amber-800: #fcd34d; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink); background: var(--bg);
+    display: flex; min-height: 100svh; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  main { width: 100%; max-width: 560px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; color: var(--ink-500); font-size: .82rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; }
+  .brand svg { display: block; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 26px 24px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  h1 { font-size: 1.45rem; line-height: 1.25; margin: 0 0 6px; }
+  .sub { color: var(--ink-500); margin: 0 0 20px; font-size: .92rem; }
+  .signals { background: var(--amber-050); border: 1px solid var(--amber-line); color: var(--amber-800); border-radius: 10px; padding: 12px 14px; font-size: .88rem; margin-bottom: 20px; }
+  .signals b { display: block; margin-bottom: 2px; }
+  ul { margin: 0 0 22px; padding: 0; list-style: none; }
+  li { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: .93rem; }
+  li:last-child { border-bottom: 0; }
+  li .mark { flex: none; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: .72rem; font-weight: 700; color: #fff; background: var(--teal); margin-top: 2px; }
+  li .mark.no { background: var(--ink-500); }
+  li span { color: var(--ink-500); }
+  li strong { color: var(--ink); font-weight: 600; }
+  button {
+    width: 100%; font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--teal); color: #fff; border: 0; border-radius: 10px;
+    padding: 14px; min-height: 48px;
+  }
+  button:active { transform: translateY(1px); }
+  .hint { color: var(--ink-500); font-size: .8rem; text-align: center; margin: 12px 0 0; }
+  .queue { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--teal); }
+  footer { margin-top: 18px; text-align: center; color: var(--ink-500); font-size: .78rem; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">
+    <img src="data:image/png;base64,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" width="48" height="48" alt="" style="display:block">
+    StockRidge
+  </div>
+
+  <div class="card">
+    <h1>You are offline</h1>
+    <p class="sub">This device has no connection to the server right now. That is normal, and it is not a fault.</p>
+
+    <div class="signals">
+      <b>Your work is safe.</b>
+      Anything you have recorded on this device is queued and will be sent by itself when the network returns.
+    </div>
+
+    <ul>
+      <li><span class="mark" aria-hidden="true">✓</span><div><strong>Keep selling.</strong><span> A sale taken offline is stamped, receipted and queued on this device.</span></div></li>
+      <li><span class="mark" aria-hidden="true">✓</span><div><strong>Nothing to do.</strong><span> The queue pushes by itself. Do not re-enter a sale that may already be queued — it will be recorded twice.</span></div></li>
+      <li><span class="mark no" aria-hidden="true">×</span><div><strong>Live stock and prices need the server.</strong><span> The last figures this device downloaded are shown, with the time they were fetched.</span></div></li>
+    </ul>
+
+    <button type="button" onclick="location.replace('/')">Try the app again</button>
+    <p class="hint" id="hint-line">If this device has never been online, open the app once with a connection first.</p>
+  </div>
+
+  <footer>StockRidge — offline mode</footer>
+</main>
+
+<script>
+  // TELL THEM HOW MANY SALES ARE WAITING, IF THE DEVICE CAN TELL US.
+  //
+  // The number matters more than anything else on this page: a cashier who can see
+  // "3 waiting to send" knows the system has their back, and a cashier who sees
+  // nothing starts writing sales on paper. IndexedDB is read directly here because
+  // this page has no application scripts — and every failure is swallowed, because
+  // a fallback page that throws is worse than one that says less.
+  (function () {
+    var hint = document.getElementById('hint-line');
+    try {
+      if (!window.indexedDB) return;
+      var open = indexedDB.open('stockridge');
+      open.onerror = function () { };
+      open.onsuccess = function () {
+        try {
+          var db = open.result;
+          if (!db.objectStoreNames.contains('outbox')) return;
+          var tx = db.transaction('outbox', 'readonly');
+          var count = tx.objectStore('outbox').count();
+          count.onsuccess = function () {
+            var n = Number(count.result) || 0;
+            if (n > 0) {
+              hint.innerHTML = '<span class="queue">' + n + '</span> item' + (n === 1 ? '' : 's')
+                + ' on this device waiting to be sent. Nothing has been lost.';
+            }
+          };
+        } catch (e) { /* the hint is optional */ }
+      };
+    } catch (e) { /* the hint is optional */ }
+  }());
+
+  // AND TRY AGAIN BY ITSELF. A shopkeeper should not have to nurse this page: the
+  // connection usually returns within seconds, and a page that keeps trying turns
+  // a dead end into a two-second wait. `location.replace` rather than `assign`, so
+  // the back button does not land on an offline page that no longer applies.
+  var tries = 0;
+  (function again() {
+    if (tries > 6) return;
+    tries += 1;
+    fetch('/api/health', { cache: 'no-store' })
+      .then(function (r) { if (r.ok) location.replace('/'); else setTimeout(again, 3000); })
+      .catch(function () { setTimeout(again, 3000); });
+  }());
+</script>
+</body>
+</html>

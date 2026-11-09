@@ -1,0 +1,2217 @@
+'use strict';
+// =====================================================================
+// server/services/salesService.js — THE SALE TRANSACTION
+// =====================================================================
+// This is the most consequential function in the application. It moves
+// stock, records money, touches the customer ledger, writes the general
+// ledger, captures serials and starts warranty clocks, and it does all of
+// that at a counter with a queue behind it, on hardware that may lose power
+// and a network that may drop mid-request.
+//
+// THE ORDER OF OPERATIONS IS NOT ARBITRARY.
+//
+//   1. RESOLVE  products, variants, batches, prices, units  (reads)
+//   2. VALIDATE stock availability, authority, credit, plan limits (reads)
+//   3. QUEUE    every write into the transaction collector
+//   4. COMMIT   atomically
+//
+// Nothing is written until every read has succeeded, because a half-written
+// sale is the worst possible state: stock gone with no record, or a record
+// with no stock movement. The collector contract in server/lib/db.js exists
+// precisely to make step 4 atomic on both backends.
+//
+// SPECIFIC INVARIANTS, each of which was a real bug somewhere:
+//
+//   STOCK DECREMENT IS IN BASE UNITS. A sale of 2 cartons of a 48-piece
+//     carton decrements 96. If this is wrong, every valuation, reorder
+//     alert and stocktake variance is wrong too, and the error compounds.
+//
+//   FIFO BATCH CONSUMPTION, expiry first. Two routes that each pick their
+//     own batch can both believe they own the same one and oversell.
+//     domain/uom.selectBatchesFifo is the only picker.
+//
+//   THE PRICE ACTUALLY CHARGED IS RECORDED WITH ITS SOURCE. A snapshot, not
+//     a lookup: the batch price moves tomorrow, the sale must not.
+//
+//   COST IS SNAPSHOTTED PER LINE AT FULL PRECISION. Margin history that
+//     drifts when a cheaper delivery arrives is not margin history.
+//
+//   VAT IS EXTRACTED, NEVER ADDED. See domain/nigerianTax.js.
+//
+//   A CREDIT SALE WRITES THE DEBTOR LEDGER IN THE SAME TRANSACTION. A sale
+//     recorded without its ledger entry is a customer who owes money the
+//     books do not know about — and the books are what the owner relies on
+//     to refuse the NEXT sale.
+//
+//   SERIALS ARE MARKED SOLD AND WARRANTY CLOCKS STARTED IN THE SAME
+//     TRANSACTION, and each gets a hash-chained event. A fridge sold without
+//     its serial being marked is a warranty claim that cannot be verified
+//     eight months later, which is a straight loss.
+//
+//   THE RECEIPT NUMBER IS ALLOCATED INSIDE THE TRANSACTION. Allocated
+//     outside, two concurrent sales at one branch get the same number and
+//     the UNIQUE index rejects the second — mid-queue.
+// =====================================================================
+
+const { newId, shortCode } = require('../../domain/crypto');
+const { round2, roundTo } = require('../../domain/money');
+const { toBaseUnits, selectBatchesFifo, buildLadder } = require('../../domain/uom');
+const { computeSaleLine, computeSaleTotals, resolveUnitPrice, marginWarnings } = require('../../domain/pricing');
+const { extractVatFromInclusive } = require('../../domain/nigerianTax');
+const { creditDecision, nextBatchHold } = require('../../domain/credit');
+const { resolveProfile } = require('../../domain/verticals');
+const { supplyTermsOf } = require('../../domain/dispatch');
+const { resolveSaleTerm, paperOf } = require('../../domain/settlement');
+const { canVoidSale, canDiscount, canSellOnCredit, canOverrideCreditLimit } = require('../../domain/planLimits');
+const { minutesBetween, addMonths, watNow, watToday, utcToWat, watToUtc, parseTimestamp, claimedWatToUtcSql, utcNow } = require('../../domain/time');
+const trade = require('../../domain/trade');
+const pharmacy = require('../../domain/pharmacy');
+const { atLeast } = require('../../domain/roles');
+const { computeRowHash } = require('../../domain/hashChain');
+const { HttpError } = require('../lib/http');
+const glService = require('./glService');
+
+const SALE_TYPES = Object.freeze(['RETAIL', 'WHOLESALE', 'CREDIT', 'INSTALMENT', 'LAYAWAY', 'EXCHANGE', 'INTERNAL']);
+const PAYMENT_METHODS = Object.freeze([
+  'CASH', 'POS_TERMINAL', 'BANK_TRANSFER', 'MOBILE_MONEY', 'USSD', 'CHEQUE',
+  'CREDIT', 'INSTALMENT', 'DEPOSIT', 'GIFT_CARD', 'VOUCHER', 'OTHER',
+]);
+
+function err(message, code = 'SALE_INVALID', status = 400) {
+  return new HttpError(message, { status, code });
+}
+
+async function controlledHeadHash(db, branchId) {
+  const table = await db.first("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'controlled_substance_register'");
+  if (!table) return null;
+  const row = await db.first(
+    `SELECT entry_hash FROM controlled_substance_register
+      WHERE branch_id = ? AND is_deleted = 0
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    [String(branchId)],
+  );
+  return row ? row.entry_hash : null;
+}
+
+async function queueDispense(tx, { line, saleId, itemId, user, branch, business, prevHash }) {
+  let prescriptionId = null;
+  if (line.dispense && line.dispense.prescription) {
+    prescriptionId = tx.idFor(`rx-${line.index}`);
+    const rx = line.dispense.prescription;
+    tx.queue(`INSERT INTO prescriptions (
+        id, business_id, branch_id, sale_id, sale_item_id, product_id,
+        prescriber_name, prescriber_pcn_or_mdcn_no, patient_name, patient_phone, dosage_notes,
+        recorded_by, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+      prescriptionId, String(business.id), String(branch.id), String(saleId), String(itemId), String(line.productId),
+      rx.prescriber_name, rx.prescriber_pcn_or_mdcn_no, rx.patient_name, rx.patient_phone, rx.dosage_notes,
+      String(user.id),
+    ]);
+  }
+  if (!line.dispense || !line.dispense.kyc) return prevHash;
+  const kyc = line.dispense.kyc;
+  const fields = {
+    entry_type: 'DISPENSE',
+    business_id: String(business.id),
+    branch_id: String(branch.id),
+    product_id: String(line.productId),
+    quantity_dispensed: Number(line.quantityInBase),
+    buyer_name: kyc.buyer_name,
+    buyer_phone: kyc.buyer_phone,
+    buyer_id_type: kyc.buyer_id_type,
+    buyer_id_number: kyc.buyer_id_number,
+    dispensed_by: String(user.id),
+    sale_id: String(saleId),
+    sale_item_id: String(itemId),
+    prescription_id: prescriptionId,
+    notes: null,
+  };
+  const entryHash = await computeRowHash(prevHash, fields);
+  tx.queue(`INSERT INTO controlled_substance_register (
+      id, business_id, branch_id, sale_id, sale_item_id, product_id, entry_type,
+      quantity_dispensed, buyer_name, buyer_phone, buyer_id_type, buyer_id_number,
+      prescription_id, dispensed_by, notes, prev_hash, entry_hash, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))`, [
+    tx.idFor(`ctl-${line.index}`),
+    fields.business_id, fields.branch_id, fields.sale_id, fields.sale_item_id, fields.product_id, fields.entry_type,
+    fields.quantity_dispensed, fields.buyer_name, fields.buyer_phone, fields.buyer_id_type, fields.buyer_id_number,
+    fields.prescription_id, fields.dispensed_by, fields.notes, prevHash, entryHash,
+  ]);
+  return entryHash;
+}
+
+// ---------------------------------------------------------------------
+// LOADERS — all reads happen here, before any write is queued
+// ---------------------------------------------------------------------
+
+async function loadCatalogue(db, ids) {
+  if (!ids.length) return new Map();
+  const rows = await db.all(
+    `SELECT p.*, pc.code AS category_code, pc.name AS category_name
+     FROM products p
+     LEFT JOIN product_categories pc ON pc.id = p.category_id AND pc.business_id = p.business_id
+     WHERE p.id IN (${ids.map(() => '?').join(',')}) AND p.is_deleted = 0`,
+    ids,
+  );
+  return new Map(rows.map((r) => [String(r.id), r]));
+}
+
+async function loadVariants(db, ids) {
+  if (!ids.length) return new Map();
+  const rows = await db.all(
+    `SELECT * FROM product_variants WHERE id IN (${ids.map(() => '?').join(',')}) AND is_deleted = 0`,
+    ids,
+  );
+  return new Map(rows.map((r) => [String(r.id), r]));
+}
+
+async function loadLadders(db, productIds) {
+  if (!productIds.length) return new Map();
+  const rows = await db.all(
+    `SELECT * FROM product_units WHERE product_id IN (${productIds.map(() => '?').join(',')}) AND is_deleted = 0 ORDER BY quantity_in_base ASC`,
+    productIds,
+  );
+  const out = new Map();
+  for (const r of rows) {
+    const key = String(r.product_id);
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(r);
+  }
+  return out;
+}
+
+async function loadMeasures(db, productIds) {
+  if (!productIds.length) return new Map();
+  const rows = await db.all(
+    `SELECT * FROM product_measures WHERE product_id IN (${productIds.map(() => '?').join(',')}) AND is_deleted = 0`,
+    productIds,
+  );
+  const out = new Map();
+  for (const r of rows) {
+    const key = String(r.product_id);
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(r);
+  }
+  return out;
+}
+
+async function loadBatches(db, branchId, productIds, variantIds) {
+  if (!productIds.length) return [];
+  const params = [String(branchId)];
+  let sql = `SELECT * FROM stock_batches
+             WHERE branch_id = ? AND is_deleted = 0 AND status = 'ACTIVE'
+               AND product_id IN (${productIds.map(() => '?').join(',')})`;
+  params.push(...productIds.map(String));
+  if (variantIds.length) {
+    sql += ` AND (variant_id IS NULL OR variant_id IN (${variantIds.map(() => '?').join(',')}))`;
+    params.push(...variantIds.map(String));
+  }
+  // Ordered to match selectBatchesFifo exactly, including the stable tiebreak.
+  // Without batch_no here the SQL could return tied batches in index order —
+  // which for random hex ids varies between runs — and the sort's stability
+  // would then preserve that arbitrary order.
+  sql += ' ORDER BY expiry_date IS NULL, expiry_date ASC, received_at ASC, created_at ASC, batch_no ASC, id ASC';
+  return db.all(sql, params);
+}
+
+async function loadPriceOverrides(db, branchId, productIds, variantIds) {
+  if (!productIds.length) return new Map();
+  const params = [String(branchId), ...productIds.map(String)];
+  let sql = `SELECT * FROM product_price_overrides
+             WHERE branch_id = ? AND is_deleted = 0
+               AND product_id IN (${productIds.map(() => '?').join(',')})`;
+  if (variantIds.length) {
+    sql += ` AND (variant_id IS NULL OR variant_id IN (${variantIds.map(() => '?').join(',')}))`;
+    params.push(...variantIds.map(String));
+  }
+  const rows = await db.all(sql, params);
+  const out = new Map();
+  for (const r of rows) out.set(`${r.product_id}|${r.variant_id || ''}`, r);
+  return out;
+}
+
+async function loadPriceListItems(db, priceListIds, productIds) {
+  if (!priceListIds.length || !productIds.length) return [];
+  return db.all(
+    `SELECT * FROM price_list_items
+     WHERE is_deleted = 0
+       AND price_list_id IN (${priceListIds.map(() => '?').join(',')})
+       AND product_id IN (${productIds.map(() => '?').join(',')})`,
+    [...priceListIds.map(String), ...productIds.map(String)],
+  );
+}
+
+async function loadSerials(db, serialNumbers) {
+  const clean = (serialNumbers || []).filter(Boolean).map(String);
+  if (!clean.length) return new Map();
+  const rows = await db.all(
+    `SELECT * FROM serial_numbers WHERE serial_no IN (${clean.map(() => '?').join(',')}) AND is_deleted = 0`,
+    clean,
+  );
+  return new Map(rows.map((r) => [String(r.serial_no), r]));
+}
+
+async function nextReceiptNo(db, branchId) {
+  // Allocated from the CURRENT MAXIMUM, not from a counter table. A counter
+  // table is one more row to keep in step, and a gap in receipt numbers
+  // invites the question "where did 4471 go?" that a shop cannot answer.
+  // Contiguous numbering within a branch is what a Nigerian tax officer
+  // expects to see on a receipt book.
+  //
+  // Called BEFORE the transaction opens. Two concurrent sales at one branch
+  // can therefore compute the same number; the UNIQUE index on
+  // (branch_id, receipt_no) makes one of them fail and retry rather than
+  // allowing a duplicate, which is the correct outcome — a duplicated
+  // receipt number is a far worse problem than one retried request.
+  const row = await db.first(
+    'SELECT receipt_no FROM sales WHERE branch_id = ? AND is_deleted = 0 ORDER BY CAST(receipt_no AS INTEGER) DESC LIMIT 1',
+    [String(branchId)],
+  );
+  const last = row ? parseInt(row.receipt_no, 10) : 0;
+  const next = (Number.isFinite(last) ? last : 0) + 1;
+  return String(next).padStart(6, '0');
+}
+
+// ---------------------------------------------------------------------
+// PREPARATION — pure computation over loaded data, no writes
+// ---------------------------------------------------------------------
+
+/**
+ * Prepare a sale. Returns everything needed to write it, plus every warning
+ * the counter should show, WITHOUT writing anything.
+ *
+ * Split from completeSale() deliberately: the POS calls prepare() on every
+ * cart change to show live totals and warnings, and calls complete() once at
+ * checkout. Two functions with different side-effect profiles is clearer
+ * than one function with a `dryRun` flag that every caller must remember to
+ * set correctly.
+ */
+async function prepare(db, {
+  branch, business, customer = null, customerClass = null, priceLists = [],
+  lines, user, settings, saleType = 'RETAIL', tillSessionId = null,
+  discountAmount = 0, discountReason = null, deliveryFee = 0, deliveryRequired = false,
+  deliveryAddress = null, notes = null, manualPriceOverrides = {},
+  tradeModes = null, releaseAgreementId = null,
+  walkInName = null, walkInPhone = null,
+  stockHolds = null, allowReservedSerials = null,
+  settlement = null,
+}) {
+  if (!branch) throw err('Choose which branch this sale belongs to.', 'BRANCH_REQUIRED');
+  if (!Array.isArray(lines) || !lines.length) throw err('A sale needs at least one item.', 'EMPTY_SALE');
+  if (lines.length > 500) throw err('A single sale cannot have more than 500 lines. Split it into two sales.', 'TOO_MANY_LINES');
+
+  const productIds = [...new Set(lines.map((l) => String(l.productId)).filter((x) => x && x !== 'undefined'))];
+  const variantIds = [...new Set(lines.map((l) => l.variantId).filter(Boolean).map(String))];
+
+  const [products, variants, ladders, measures, batches, overrides, priceListItems, serials] = await Promise.all([
+    loadCatalogue(db, productIds),
+    loadVariants(db, variantIds),
+    loadLadders(db, productIds),
+    loadMeasures(db, productIds),
+    loadBatches(db, branch.id, productIds, variantIds),
+    loadPriceOverrides(db, branch.id, productIds, variantIds),
+    loadPriceListItems(db, priceLists.map((p) => String(p.id)), productIds),
+    loadSerials(db, lines.flatMap((l) => (Array.isArray(l.serialNumbers) ? l.serialNumbers : (l.serialNumber ? [l.serialNumber] : [])))),
+  ]);
+
+  const vatEnabled = Boolean(Number(settings.vat_enabled));
+  const vatRatePercent = Number(settings.vat_rate_percent) || 0;
+  const today = watToday();
+  const commitmentRows = productIds.length
+    ? await db.all(
+      `SELECT l.product_id, l.variant_id, l.quantity_in_base, a.id AS agreement_id, a.starts_on, a.ends_on
+         FROM asset_agreement_lines l
+         JOIN asset_agreements a ON a.id = l.agreement_id
+        WHERE l.product_id IN (${productIds.map(() => '?').join(',')})
+          AND l.is_deleted = 0 AND a.is_deleted = 0
+          AND a.status = 'OUT'`,
+      productIds,
+    )
+    : [];
+  const openCommitments = commitmentRows
+    .filter((row) => String(row.agreement_id) !== String(releaseAgreementId || ''))
+    .map((row) => ({
+      productId: String(row.product_id),
+      variantId: row.variant_id ? String(row.variant_id) : '',
+      start: row.starts_on,
+      end: row.ends_on,
+      quantity: Number(row.quantity_in_base) || 0,
+    }));
+
+  // Group batches by product+variant so FIFO selection sees only the
+  // relevant pool. Including another variant's batch would let a 2-seater
+  // sofa sale consume 3-seater stock.
+  const batchKey = (productId, variantId) => `${productId}|${variantId || ''}`;
+  const batchesByKey = new Map();
+  for (const b of batches) {
+    const key = batchKey(b.product_id, b.variant_id);
+    if (!batchesByKey.has(key)) batchesByKey.set(key, []);
+    batchesByKey.get(key).push(b);
+  }
+
+  const resolvedLines = [];
+  const problems = [];
+  const warnings = [];
+  const batchConsumption = new Map(); // batchId -> qty already promised to an earlier line
+  const cartHolds = []; // promises this cart has already made, so a second line sees them
+  // Units this sale is allowed to take back from quantity_reserved. A bill
+  // payment passes the batches it held. A normal sale passes nothing, and
+  // reserved stock stays unsellable.
+  const holdMap = new Map();
+  for (const h of stockHolds || []) {
+    const id = String((h && (h.batchId || h.batch_id)) || '');
+    const qty = Number(h && (h.quantityBase != null ? h.quantityBase : h.quantity_base));
+    if (!id || !(qty > 0)) continue;
+    holdMap.set(id, roundTo((holdMap.get(id) || 0) + qty, 4));
+  }
+  const holdIds = new Set(holdMap.keys());
+  const reservedSerials = new Set((allowReservedSerials || []).map((sn) => String(sn)));
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const position = `Line ${i + 1}`;
+    const product = products.get(String(line.productId));
+    if (!product) {
+      problems.push({ line: i, code: 'PRODUCT_NOT_FOUND', message: `${position}: that product does not exist or has been deleted. Remove it and search again.` });
+      continue;
+    }
+    if (!Number(product.is_active)) {
+      problems.push({ line: i, code: 'PRODUCT_INACTIVE', message: `${position}: "${product.name}" is not active and cannot be sold. Reactivate it under Products first.` });
+      continue;
+    }
+    const variant = line.variantId ? variants.get(String(line.variantId)) : null;
+    if (line.variantId && !variant) {
+      problems.push({ line: i, code: 'VARIANT_NOT_FOUND', message: `${position}: that variant of "${product.name}" does not exist.` });
+      continue;
+    }
+    if (Number(product.tracks_variants) && !variant && !line.continuation) {
+      problems.push({ line: i, code: 'VARIANT_REQUIRED', message: `${position}: "${product.name}" comes in variants — choose the specific one (colour, size or finish) the customer is buying.` });
+      continue;
+    }
+
+    const channel = trade.channelOf(line, saleType);
+    const arrangement = trade.assertArrangement({
+      channel, modes: tradeModes, product,
+      buyout: Boolean(line.buyout), continuation: Boolean(line.continuation),
+    });
+    if (!arrangement.ok) {
+      problems.push({ line: i, code: arrangement.code, message: `${position}: ${arrangement.error}` });
+      continue;
+    }
+
+    // A continuation is not a new dispense. Everything else that leaves the
+    // shelf is, including a hire of a marked product. Unmarked goods skip this.
+    let dispense = null;
+    if (!line.continuation) {
+      try {
+        dispense = pharmacy.assertDispense(product, line);
+      } catch (e) {
+        if (e.code === 'PRESCRIPTION_REQUIRED' || e.code === 'CONTROLLED_KYC_REQUIRED') throw err(e.message, e.code);
+        throw e;
+      }
+    }
+
+    const ladderRows = ladders.get(String(product.id)) || [
+      // A product with no configured ladder falls back to a single base unit
+      // rather than refusing the sale: better to sell in pieces than to stop
+      // the queue over a setup omission, and the fallback is recorded so the
+      // omission is visible afterwards.
+      { code: 'PIECE', name: product.base_unit_name || 'piece', level: 0, quantity_in_base: 1, is_sellable: 1, is_default_sell: 1 },
+    ];
+    if (!(ladders.get(String(product.id)) || []).length) {
+      warnings.push({ line: i, code: 'NO_UNIT_LADDER', severity: 'INFO', message: `${position}: "${product.name}" has no unit ladder configured, so it is being sold in single ${product.base_unit_name || 'piece'}s. Set its units under Products.` });
+    }
+    const ladder = buildLadder(ladderRows);
+    const measureRows = measures.get(String(product.id)) || [];
+    const measure = measureRows[0] ? {
+      axis: measureRows[0].axis,
+      sellUnitCode: measureRows[0].sell_unit_code,
+      sellUnitBaseFactor: measureRows[0].sell_unit_base_factor,
+      sellUnitName: measureRows[0].sell_unit_code,
+    } : null;
+
+    const unitCode = String(line.unitCode || (ladder.ok ? ladder.defaultSell.code : 'PIECE')).toUpperCase();
+    const conversion = toBaseUnits({ quantity: line.quantity, unitCode, ladder: ladder.ok ? ladder.ladder : ladderRows, measure });
+    if (!conversion.ok) {
+      problems.push({ line: i, code: conversion.code, message: `${position} ("${product.name}"): ${conversion.error}` });
+      continue;
+    }
+
+    // ---- stock availability
+    // A sale consumes a unit forever. A hire or a lease only promises it for
+    // a window, and two windows that do not overlap can share the same unit.
+    // A continuation (the next month's rent, or a buyout of a unit already
+    // out) does not take a second unit.
+    const key = batchKey(product.id, variant ? variant.id : null);
+    const originalBatches = batchesByKey.get(key) || [];
+    const variantKey = variant ? String(variant.id) : '';
+    const sameAsset = (row) => row.productId === String(product.id) && String(row.variantId || '') === variantKey;
+    const intervals = openCommitments.filter(sameAsset).concat(cartHolds.filter(sameAsset));
+    const originalOnHand = originalBatches.reduce((a, b) => a + Number(b.quantity || 0), 0);
+    const heldBack = originalBatches.reduce((sum, b) => {
+      const asked = holdMap.get(String(b.id)) || 0;
+      return sum + Math.min(Math.max(0, Number(b.quantity_reserved) || 0), asked);
+    }, 0);
+    const reservedNow = originalBatches.reduce((a, b) => a + Number(b.quantity_reserved || 0), 0) - heldBack;
+    const holding = trade.holdsStock(channel) && !line.continuation && !line.buyout;
+    let span = null;
+    let selection = { ok: true, picks: [] };
+    if (line.continuation) {
+      selection = { ok: true, picks: [] };
+    } else if (holding) {
+      span = trade.windowFor(line, { today });
+      if (!span.ok) {
+        problems.push({ line: i, code: span.code, message: `${position}: ${span.error}` });
+        continue;
+      }
+      const free = trade.fleetFree({ onHand: originalOnHand, reserved: reservedNow, intervals, start: span.start, end: span.end });
+      if (free + 1e-9 < conversion.baseQuantity) {
+        const name = variant ? `${product.name} (${variant.name})` : product.name;
+        problems.push({
+          line: i, code: 'NOT_FREE_FOR_THOSE_DATES',
+          message: `${position}: only ${roundTo(free, 2).toLocaleString('en-NG')} ${product.base_unit_name || 'unit'}${free === 1 ? '' : 's'} of "${name}" is free from ${span.start} to ${span.end}, and this line needs ${roundTo(conversion.baseQuantity, 2).toLocaleString('en-NG')}. Another booking already has them, or they are held on layaway.`,
+          available: free, required: conversion.baseQuantity,
+        });
+        continue;
+      }
+      cartHolds.push({ productId: String(product.id), variantId: variantKey, start: span.start, end: span.end, quantity: conversion.baseQuantity });
+    } else {
+      const free = trade.fleetFree({ onHand: originalOnHand, reserved: reservedNow, intervals, start: today, end: trade.FOREVER });
+      const pool = originalBatches.map((b) => {
+        const promised = batchConsumption.get(String(b.id)) || 0;
+        const asked = holdMap.get(String(b.id)) || 0;
+        const giveBack = Math.min(Math.max(0, Number(b.quantity_reserved) || 0), asked);
+        return {
+          ...b,
+          quantity: roundTo(Number(b.quantity) - promised, 4),
+          quantity_reserved: roundTo(Math.max(0, Number(b.quantity_reserved || 0) - giveBack), 4),
+        };
+      });
+      selection = selectBatchesFifo(pool, conversion.baseQuantity, { asOf: today, preferIds: holdIds });
+      const name = variant ? `${product.name} (${variant.name})` : product.name;
+      if (free + 1e-9 < conversion.baseQuantity) {
+        const booked = trade.peakInWindow(intervals, today, trade.FOREVER);
+        problems.push({
+          line: i, code: booked > 0 ? 'HELD_FOR_A_BOOKING' : 'INSUFFICIENT_STOCK',
+          message: booked > 0
+            ? `${position}: ${roundTo(booked, 2).toLocaleString('en-NG')} ${product.base_unit_name || 'unit'}${booked === 1 ? '' : 's'} of "${name}" is already promised on a hire or a lease. Selling this line would leave a booking short. ${roundTo(free, 2).toLocaleString('en-NG')} can still be sold.`
+            : `${position}: only ${roundTo(free, 2).toLocaleString('en-NG')} ${product.base_unit_name || 'unit'}${free === 1 ? '' : 's'} of "${name}" is available at this branch, and this line needs ${roundTo(conversion.baseQuantity, 2).toLocaleString('en-NG')}. Transfer stock in, or sell what is on the shelf.`,
+          available: free, required: conversion.baseQuantity,
+        });
+        continue;
+      }
+      if (!selection.ok) {
+        const isExpired = (b) => b.expiry_date && String(b.expiry_date).slice(0, 10) < today;
+        const freeOf = (b) => Math.max(0, Number(b.quantity) - Number(b.quantity_reserved || 0));
+        const expiredFree = pool.reduce((a, b) => a + (isExpired(b) ? freeOf(b) : 0), 0);
+        const sellable = pool.reduce((a, b) => a + (isExpired(b) ? 0 : freeOf(b)), 0);
+        if (expiredFree > 0 && sellable <= 0) {
+          problems.push({
+            line: i, code: 'EXPIRED_STOCK',
+            message: `${position}: "${name}" on the shelf is past its expiry date and cannot be sold. Receive a fresh batch.`,
+            available: 0, required: conversion.baseQuantity,
+          });
+          continue;
+        }
+        const available = sellable;
+        problems.push({
+          line: i, code: 'INSUFFICIENT_STOCK',
+          message: `${position}: only ${roundTo(available, 2).toLocaleString('en-NG')} ${product.base_unit_name || 'unit'}${available === 1 ? '' : 's'} of "${name}" is available at this branch, and this line needs ${roundTo(conversion.baseQuantity, 2).toLocaleString('en-NG')}. Transfer stock in, or sell what is on the shelf.`,
+          available, required: conversion.baseQuantity, shortfall: selection.shortfallBase,
+        });
+        continue;
+      }
+      for (const pick of selection.picks) {
+        batchConsumption.set(String(pick.batch.id), roundTo((batchConsumption.get(String(pick.batch.id)) || 0) + pick.quantityBase, 4));
+        const id = String(pick.batch.id);
+        const used = Math.min(holdMap.get(id) || 0, pick.quantityBase);
+        if (used > 0) holdMap.set(id, roundTo((holdMap.get(id) || 0) - used, 4));
+      }
+      cartHolds.push({ productId: String(product.id), variantId: variantKey, start: today, end: trade.FOREVER, quantity: conversion.baseQuantity });
+    }
+
+    // ---- price
+    // Hire and lease are priced per day or per month, not at the shelf price.
+    // The line quantity stays the number of units (so stock math is right).
+    // The unit price is the fee for the window, so quantity times price is
+    // what the customer pays for the use, and the deposit is not in it.
+    const override = overrides.get(`${product.id}|${variant ? variant.id : ''}`) || overrides.get(`${product.id}|`);
+    const manual = manualPriceOverrides[i] != null ? manualPriceOverrides[i] : (line.manualPrice != null ? line.manualPrice : null);
+    let pricing;
+    let holdRate = null;
+    let holdDeposit = 0;
+    if (holding || (line.continuation && trade.holdsStock(channel))) {
+      const catalogue = trade.catalogueRate(product, channel);
+      const typed = line.rate != null ? Number(line.rate) : (manual != null ? Number(manual) : null);
+      const rate = typed != null && Number.isFinite(typed) ? typed : catalogue;
+      if (!(rate > 0)) {
+        problems.push({
+          line: i, code: 'NO_RATE',
+          message: `${position}: "${product.name}" has no ${channel === 'LEASE' ? 'monthly rent' : 'daily hire rate'}. Set it in the catalogue before booking it out.`,
+        });
+        continue;
+      }
+      if (typed != null && Math.abs(typed - catalogue) > 0.009 && catalogue > 0) {
+        const priceCheck = canDiscount(settings, user, { discountPct: 0 });
+        if (!priceCheck.allowed && String(user.role).toUpperCase() !== 'MANAGER' && String(user.role).toUpperCase() !== 'OWNER') {
+          problems.push({ line: i, code: 'MANUAL_PRICE_NOT_ALLOWED', message: `${position}: only a manager or the owner can charge a rate other than the one in the catalogue.` });
+          continue;
+        }
+      }
+      const periods = line.continuation ? 1 : span.periods;
+      const collect = line.collect || line.collectTerm;
+      const fee = trade.openingFee({ channel, rate, quantity: Number(line.quantity), periods, collect });
+      holdRate = rate;
+      holdDeposit = line.continuation ? 0 : trade.catalogueDeposit(product, channel, Number(line.quantity));
+      if (line.deposit != null && Number.isFinite(Number(line.deposit))) holdDeposit = round2(Number(line.deposit));
+      pricing = { unitPrice: Number(line.quantity) > 0 ? Math.round((fee / Number(line.quantity)) * 100) / 100 : fee, source: typed != null && catalogue > 0 && Math.abs(typed - catalogue) > 0.009 ? 'MANUAL' : 'BATCH', priceListId: null };
+    } else {
+      pricing = resolveUnitPrice({
+        product, variant,
+        batch: selection.picks[0] ? selection.picks[0].batch : null,
+        override,
+        priceListItems,
+        customer,
+        unitCode,
+        quantity: Number(line.quantity),
+        manualPrice: manual,
+        ladder: ladder.ok ? ladder.ladder : ladderRows,
+      });
+    }
+
+    // AN UNPRICED GOOD IS NOT A SALE. The market list and a new product both
+    // arrive with no price, and the till refuses to ring them. The same rule
+    // has to hold here, or a request that skips the till sells the item for
+    // nothing and the books record a sale that took no money.
+    const cataloguePrice = Number(product.selling_price) || 0;
+    const typedPrice = manual != null && Number.isFinite(Number(manual)) ? Number(manual) : null;
+    if (!holding && !line.continuation && cataloguePrice <= 0 && Number(pricing.unitPrice) <= 0 && !(typedPrice > 0)) {
+      problems.push({
+        line: i,
+        code: 'NO_PRICE',
+        message: `${position}: "${product.name}" has no price. Set a price in the catalogue before selling it.`,
+      });
+      continue;
+    }
+
+    // ---- authority to charge a manual price
+    if (pricing.source === 'MANUAL' && !line.buyout) {
+      const priceCheck = canDiscount(settings, user, { discountPct: 0 });
+      if (!priceCheck.allowed && String(user.role).toUpperCase() !== 'MANAGER' && String(user.role).toUpperCase() !== 'OWNER') {
+        problems.push({ line: i, code: 'MANUAL_PRICE_NOT_ALLOWED', message: `${position}: only a manager or the owner can type a price at the counter. ${priceCheck.reason || ''}` });
+        continue;
+      }
+    }
+
+    const computed = computeSaleLine({
+      product, variant,
+      batch: selection.picks[0] ? selection.picks[0].batch : null,
+      ladder: ladder.ok ? ladder.ladder : ladderRows,
+      measure,
+      unitCode,
+      quantity: Number(line.quantity),
+      unitPrice: pricing.unitPrice,
+      priceSource: pricing.source,
+      priceListId: pricing.priceListId || null,
+      discountAmount: line.discountAmount != null ? line.discountAmount : null,
+      discountPct: line.discountPct != null ? line.discountPct : null,
+      // Cost is the FIFO-weighted cost of the batches actually consumed, not
+      // the product's last-known average: this sale is consuming THESE units.
+      costPerBaseUnit: holding || !selection.picks.length ? 0 : selection.picks.reduce((a, p) => a + p.quantityBase * p.costPerBaseUnit, 0) / selection.picks.reduce((a, p) => a + p.quantityBase, 0),
+      vatEnabled, vatRatePercent,
+    });
+    if (!computed.ok) {
+      problems.push({ line: i, code: computed.code, message: `${position}: ${computed.error}` });
+      continue;
+    }
+
+    // ---- serials
+    const requestedSerials = Array.isArray(line.serialNumbers) ? line.serialNumbers.filter(Boolean).map(String) : (line.serialNumber ? [String(line.serialNumber)] : []);
+    const serialRows = [];
+    // WHETHER SERIALS ARE DEMANDED IS THE BUSINESS'S SWITCH, NOT THE PRODUCT'S FLAG.
+    //
+    // Off unless the owner has turned it on. A missing settings row is the same
+    // answer as off — a deployment that has not chosen serials must not be asked
+    // for them. Numbers that ARE typed are still checked: a serial somebody entered
+    // is a claim about which unit left the shop.
+    const serialTrackingOn = Boolean(settings) && Number(settings.serial_tracking_enabled) === 1;
+    const serialTracked = Number(product.requires_serial) === 1;
+    if (serialTracked && serialTrackingOn) {
+      if (requestedSerials.length !== Math.ceil(conversion.baseQuantity)) {
+        problems.push({
+          line: i, code: 'SERIALS_REQUIRED',
+          message: `${position}: "${product.name}" is serial-tracked, so each unit needs its own serial number. Expected ${Math.ceil(conversion.baseQuantity)}, got ${requestedSerials.length}. Scan or type the serial from the label on each item.`,
+        });
+        continue;
+      }
+    }
+    if (serialTracked && requestedSerials.length) {
+      let serialProblem = null;
+      for (const sn of requestedSerials) {
+        const found = serials.get(sn);
+        if (!found) {
+          serialProblem = `Serial "${sn}" is not in this system. It must be captured at goods-received before it can be sold — otherwise its warranty cannot be verified later.`;
+          break;
+        }
+        if (String(found.product_id) !== String(product.id)) {
+          serialProblem = `Serial "${sn}" belongs to a different product (${found.product_id}), not "${product.name}".`;
+          break;
+        }
+        if (found.status === 'RESERVED' && !reservedSerials.has(String(sn))) {
+          serialProblem = `Serial "${sn}" is held on an unpaid bill. Take payment on that bill, or cancel it, before this unit can be sold.`;
+          break;
+        }
+        if (found.status !== 'IN_STOCK' && found.status !== 'RESERVED') {
+          serialProblem = `Serial "${sn}" is already ${String(found.status).replace(/_/g, ' ').toLowerCase()}, so it cannot be sold again. Check the label on the unit in front of you.`;
+          break;
+        }
+        if (found.branch_id && String(found.branch_id) !== String(branch.id)) {
+          serialProblem = `Serial "${sn}" is recorded at a different branch. Transfer it here first, or sell it from that branch.`;
+          break;
+        }
+        serialRows.push(found);
+      }
+      if (serialProblem) { problems.push({ line: i, code: 'SERIAL_INVALID', message: `${position}: ${serialProblem}` }); continue; }
+    } else if (!serialTracked && requestedSerials.length) {
+      warnings.push({ line: i, code: 'SERIALS_IGNORED', severity: 'INFO', message: `${position}: "${product.name}" is not serial-tracked, so the serial(s) entered were recorded as a note but not tracked individually.` });
+    }
+
+    // ---- margin guard rail (advisory)
+    for (const w of marginWarnings({ line: computed, product, minMarginPct: product.min_margin_pct })) {
+      warnings.push({ line: i, code: w.code, severity: w.severity, message: `${position} ("${product.name}"): ${w.message}` });
+    }
+
+    // ---- discount authority
+    if (computed.discountAmount > 0) {
+      const pct = computed.lineTotal + computed.discountAmount > 0
+        ? (computed.discountAmount / (computed.lineTotal + computed.discountAmount)) * 100 : 0;
+      const allowed = canDiscount(settings, user, { discountPct: pct });
+      if (!allowed.allowed) {
+        problems.push({ line: i, code: 'DISCOUNT_NOT_ALLOWED', message: `${position}: ${allowed.reason}` });
+        continue;
+      }
+    }
+
+    if (holding || (line.continuation && trade.holdsStock(channel))) {
+      computed.totalCost = 0;
+      computed.costPriceSnapshot = 0;
+      computed.margin = computed.revenueNetOfVat;
+      computed.marginPct = computed.revenueNetOfVat > 0 ? 100 : 0;
+    }
+    const holdNote = span
+      ? (channel === 'HIRE'
+        ? `Hire ${span.start} to ${span.end} (${span.periods} day${span.periods === 1 ? '' : 's'}) at ${holdRate} a day. Deposit is held separately.`
+        : `Lease from ${span.start} to ${span.end} (${span.periods} month${span.periods === 1 ? '' : 's'}) at ${holdRate} a month. Deposit is held separately.`)
+      : (line.notes || null);
+    resolvedLines.push({
+      ...computed,
+      index: i,
+      channel,
+      hold: Boolean(holding),
+      continuation: Boolean(line.continuation),
+      buyout: Boolean(line.buyout),
+      startsOn: span ? span.start : null,
+      endsOn: span ? span.end : null,
+      periods: span ? span.periods : null,
+      periodUnit: span ? span.periodUnit : null,
+      rate: holdRate,
+      deposit: holdDeposit,
+      collect: line.collect || null,
+      venue: line.venue || null,
+      agreementId: line.agreementId || line.agreement_id || null,
+      notes: holdNote || line.notes || null,
+      dispense,
+      product, variant,
+      picks: selection.picks.map((p) => ({
+        batchId: String(p.batch.id),
+        batchNo: p.batch.batch_no || null,
+        quantityBase: p.quantityBase,
+        quantity: p.quantityBase,
+        costPerBaseUnit: p.costPerBaseUnit,
+        expiry: p.batch.expiry_date || null,
+        expiryDate: p.batch.expiry_date || null,
+      })),
+      serialRows,
+      requestedSerials,
+      measure,
+      unitName: unitCode,
+    });
+  }
+
+  if (problems.length) {
+    const e = err(problems.map((p) => p.message).join(' '), 'SALE_PREPARATION_FAILED', 400);
+    e.problems = problems;
+    e.warnings = warnings;
+    throw e;
+  }
+
+  const totals = computeSaleTotals({
+    lines: resolvedLines, vatEnabled, vatRatePercent,
+    orderDiscount: discountAmount, deliveryFee,
+  });
+
+  // ---- discount authority on the ORDER-level discount
+  if (Number(discountAmount) > 0 && totals.subtotal > 0) {
+    const pct = (Number(discountAmount) / totals.subtotal) * 100;
+    const allowed = canDiscount(settings, user, { discountPct: pct });
+    if (!allowed.allowed) throw err(allowed.reason, 'DISCOUNT_NOT_ALLOWED', 403);
+  }
+
+  // Payment validation happens in complete(), not here: prepare() is a pure
+  // read used to render live totals and warnings as the cart changes, and
+  // the payment legs do not exist yet at that point.
+  // Credit is the choice recorded at the start, not only the sale-type word.
+  // A wholesale depot can stay WHOLESALE for the price and the ledger
+  // account, and still be supplied on credit.
+  const isCredit = settlement === 'CREDIT' || ['CREDIT', 'INSTALMENT', 'LAYAWAY'].includes(String(saleType).toUpperCase());
+  const depositDue = round2(resolvedLines.reduce((a, l) => a + Number(l.deposit || 0), 0));
+  if (resolvedLines.some((l) => l.channel === 'HIRE' && !l.continuation)) {
+    const named = (customer && customer.name) || walkInName;
+    const phone = (customer && customer.phone) || walkInPhone;
+    if (!named || !phone) {
+      throw err('A hire needs the customer’s name and a phone number. The goods have to come back to somebody.', 'HIRE_NEEDS_CONTACT', 400);
+    }
+  }
+  if (resolvedLines.some((l) => l.channel === 'LEASE' && !l.continuation) && !customer) {
+    throw err('A lease needs a customer on the books. A walk-in name is not enough for a term.', 'LEASE_NEEDS_CUSTOMER', 400);
+  }
+
+  return {
+    ok: true,
+    branch, business,
+    customer, customerClass,
+    saleType: String(saleType).toUpperCase(),
+    tradeMix: trade.describeMix(resolvedLines.map((l) => l.channel)),
+    depositDue,
+    lines: resolvedLines,
+    totals,
+    warnings,
+    vatEnabled, vatRatePercent,
+    isCredit,
+    settlement: settlement || (isCredit ? 'CREDIT' : 'SPOT'),
+    discountAmount: round2(Number(discountAmount) || 0),
+    discountReason,
+    deliveryFee: round2(Number(deliveryFee) || 0),
+    deliveryRequired: Boolean(deliveryRequired),
+    deliveryAddress,
+    notes,
+    tillSessionId,
+    batchConsumption,
+  };
+}
+
+/**
+ * Normalise and validate the payment legs.
+ *
+ * Kept as a separate function because the rules are fiddly and are needed in
+ * three places (prepare, complete, and the offline-queue replay validation),
+ * and three copies of fiddly rules is three chances to get one wrong.
+ */
+function validatePayments({ payments, totals, saleType, isCredit, settings, user, customer, creditInfo, changeOwed = 0, depositHeld = 0, depositApplied = 0 }) {
+  const legs = Array.isArray(payments) ? payments.filter((p) => p && Number(p.amount) > 0) : [];
+  const out = [];
+  let sum = 0;
+
+  for (const leg of legs) {
+    const method = String(leg.method || '').toUpperCase();
+    if (!PAYMENT_METHODS.includes(method)) {
+      throw err(`"${leg.method}" is not a payment method this system records. Choose one of: ${PAYMENT_METHODS.join(', ')}.`, 'UNKNOWN_PAYMENT_METHOD');
+    }
+    const amount = round2(Number(leg.amount));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw err('Each payment must be a positive amount.', 'INVALID_PAYMENT_AMOUNT');
+    }
+    if (method === 'CREDIT' && !isCredit) {
+      throw err('A CREDIT payment leg means the customer is taking the goods now and paying later. Record the sale as a credit sale, or take a real payment.', 'CREDIT_ON_CASH_SALE');
+    }
+    if (['POS_TERMINAL', 'BANK_TRANSFER', 'MOBILE_MONEY', 'USSD', 'CHEQUE'].includes(method) && !leg.reference) {
+      // Not a hard block on CASH, but every non-cash leg in Nigeria is
+      // reconciled against a bank or terminal report by its reference. A leg
+      // with no reference cannot be matched, so at close of day it becomes an
+      // unexplained difference the owner has to investigate by hand.
+      out.push({ ...leg, method, amount, warning: `No reference recorded for this ${method.replace(/_/g, ' ').toLowerCase()} payment. It will be hard to match against the bank or terminal report at reconciliation.` });
+      sum = round2(sum + amount);
+      continue;
+    }
+    out.push({
+      method, amount,
+      reference: leg.reference ? String(leg.reference).slice(0, 120) : null,
+      bankName: leg.bank_name || leg.bankName || null,
+      status: method === 'CHEQUE' ? 'PENDING' : (leg.status || 'CLEARED'),
+      // EITHER SPELLING, AND THAT IS THE FIX.
+      //
+      // These two lines used to read `leg.cash_tendered` and `leg.change_given` — the raw
+      // names a JSON body carries. But every caller of this function hands over
+      // ALREADY-NORMALISED legs, and both of them use camelCase: the sales route maps
+      // `cash_tendered` → `cashTendered` in `normalisePayments()`, and the after-sales
+      // route builds `cashTendered` directly. So both reads were always undefined, and
+      // the consequence was total rather than partial:
+      //
+      //   * `sale_payments.cash_tendered` was NULL on every sale ever recorded;
+      //   * `sale_payments.change_given` was NULL on every sale ever recorded;
+      //   * `sales.change_given` fell through to 0 — the figure the receipt, the till
+      //     argument and any dispute about the counter would have to rest on;
+      //   * `sales.cash_tendered` fell back to the cash APPLIED, which quietly turned
+      //     "the customer handed over ₦35,500" into "the customer handed over ₦34,000".
+      //
+      // A key renamed between two layers, which no compiler sees and no unit test caught
+      // because the unit tests call this function with the names it was reading. Found by
+      // test/audit/audit.money.js, which rings a sale over HTTP and reads the tender back.
+      //
+      // Both spellings are accepted so a caller written either way works, and the snake
+      // form stays first because that is what the function documented.
+      cashTendered: (leg.cash_tendered ?? leg.cashTendered) != null ? round2(Number(leg.cash_tendered ?? leg.cashTendered)) : null,
+      changeGiven: (leg.change_given ?? leg.changeGiven) != null ? round2(Number(leg.change_given ?? leg.changeGiven)) : null,
+      notes: leg.notes || null,
+    });
+    sum = round2(sum + amount);
+  }
+
+  // ---- CHANGE OWED IS PART OF WHAT THE CUSTOMER HANDED OVER
+  //
+  // A till with no small notes owes the customer the difference: they pay
+  // ₦3,000 for a ₦2,500 sale and collect ₦500 later on a claim code. The money
+  // received is therefore the total PLUS change owed, and validating against the
+  // total alone reports that as a ₦500 overpayment and refuses the sale — at the
+  // counter, in front of the customer.
+  //
+  // `paid` stays capped at the sale total. The excess is not revenue and not a
+  // part-payment; it is a liability the shop holds, recorded in change_owed with
+  // its own claim code and expiry date.
+  // ---- A CREDIT LEG IS A PROMISE, NOT MONEY
+  //
+  // Splitting the legs matters more than anything else in this function. A
+  // CREDIT leg records "this much goes on the customer's account"; counting it
+  // as money received made a fully-credit sale look fully PAID, so balanceDue
+  // came out zero, the debtor ledger was never written, and the shop handed over
+  // the goods having recognised revenue against money that does not exist. The
+  // till also claimed cash it never held, so the day's count came out OVER by
+  // exactly the credit sales — and a surplus variance is the one nobody
+  // investigates.
+  let cashSum = 0;
+  let creditSum = 0;
+  for (const leg of out) {
+    if (leg.method === 'CREDIT') creditSum = round2(creditSum + leg.amount);
+    else cashSum = round2(cashSum + leg.amount);
+  }
+
+  const owed = round2(Math.max(0, Number(changeOwed) || 0));
+  // A hire or lease deposit is cash the till must take, and it is not part of
+  // the sale total. The expected cash is the bill, plus the deposit, plus any
+  // change the till is holding back. The deposit is not change and not revenue.
+  const held = round2(Math.max(0, Number(depositHeld) || 0));
+  const tolerance = 0.005;
+  const advisories = [];
+
+  if (isCredit) {
+    // A credit sale is settled by some mixture of real money and account. The
+    // two together must equal the total: less means the customer owes more than
+    // anybody recorded, more means money arrived that belongs to no bill.
+    const combined = round2(cashSum + creditSum);
+    if (combined + tolerance < totals.total) {
+      throw err(
+        `This credit sale totals \u20a6${totals.total.toLocaleString('en-NG')} but only \u20a6${combined.toLocaleString('en-NG')} is accounted for (\u20a6${cashSum.toLocaleString('en-NG')} paid, \u20a6${creditSum.toLocaleString('en-NG')} on account) \u2014 \u20a6${round2(totals.total - combined).toLocaleString('en-NG')} short. Add the missing payment leg, or put the rest on account.`,
+        'UNDERPAID',
+      );
+    }
+    if (combined - tolerance > totals.total) {
+      throw err(
+        `This credit sale totals \u20a6${totals.total.toLocaleString('en-NG')} but \u20a6${combined.toLocaleString('en-NG')} is recorded across its payment legs \u2014 \u20a6${round2(combined - totals.total).toLocaleString('en-NG')} too much. A bill cannot be over-settled by mixing cash and credit.`,
+        'OVERPAID',
+      );
+    }
+    if (creditSum <= 0) {
+      // Settled in full but recorded as a credit sale. Not an error — but the
+      // sale type is now wrong and credit-sales reports would count it.
+      advisories.push('This sale is marked as credit but is settled in full, so no debt is recorded. Consider recording it as a retail or wholesale sale instead.');
+    }
+  } else {
+    // A non-credit sale may not carry a credit leg at all (enforced above), so
+    // everything received is real money and must cover the total plus whatever
+    // change the till owes back.
+    const appliedDeposit = round2(Math.max(0, Number(depositApplied) || 0));
+    const expected = round2(totals.total + held + owed - appliedDeposit);
+    if (cashSum + tolerance < expected) {
+      throw err(
+        `This sale totals \u20a6${totals.total.toLocaleString('en-NG')}${owed > 0 ? ` plus \u20a6${owed.toLocaleString('en-NG')} change owed` : ''} but only \u20a6${cashSum.toLocaleString('en-NG')} of payment is recorded \u2014 \u20a6${round2(expected - cashSum).toLocaleString('en-NG')} short. Add the remaining payment, or record it as a credit sale if the customer is paying later.`,
+        'UNDERPAID',
+      );
+    }
+    if (cashSum - tolerance > expected) {
+      throw err(
+        `This sale totals \u20a6${totals.total.toLocaleString('en-NG')} but \u20a6${cashSum.toLocaleString('en-NG')} of payment is recorded \u2014 \u20a6${round2(cashSum - expected).toLocaleString('en-NG')} too much. Correct the amount, or record the difference as change owed to the customer.`,
+        'OVERPAID',
+      );
+    }
+  }
+
+  // What actually went back over the counter — see deriveChangeGiven().
+  deriveChangeGiven(out, changeOwed);
+
+  return {
+    legs: out,
+    advisories,
+    // Real money applied to the sale. Change owed sits above this and is a
+    // liability the shop holds, not a payment.
+    paid: round2(Math.min(cashSum, totals.total)),
+    tendered: round2(cashSum),
+    creditLeg: creditSum,
+    depositHeld: held,
+    changeOwed: round2(Math.max(0, cashSum - totals.total - held)),
+    // What the customer still owes: for a credit sale, the total less the real
+    // money taken. This is the figure the debtor ledger posts, so the two can
+    // never disagree.
+    balanceDue: isCredit ? round2(Math.max(0, totals.total - cashSum)) : 0,
+  };
+}
+
+// ---------------------------------------------------------------------
+// COMPLETE — the write path
+// ---------------------------------------------------------------------
+
+/**
+ * Complete a sale atomically.
+ *
+ * Returns the sale row plus everything the receipt printer needs, so the
+ * POS does not have to make a second round trip to render the receipt — on
+ * a dropped connection that second request is the one that fails, and the
+ * customer leaves without a receipt for a sale that did commit.
+ */
+// ---------------------------------------------------------------------
+// SERIAL EVENT CHAIN — ONE FIELD SET FOR WRITING AND VERIFYING
+// ---------------------------------------------------------------------
+/**
+ * The exact fields that go into a serial_events row hash.
+ *
+ * A hash chain is only evidence if a third party can RECOMPUTE it from the
+ * stored row. That requires the writer and the verifier to agree on which
+ * fields were hashed, in which shape. When they are written separately they
+ * drift — the writer hashes a `note` the verifier does not know to include, or
+ * one side stringifies a branch id and the other does not — and every chain
+ * then fails verification, which is indistinguishable from the tampering the
+ * chain exists to detect. A register that always reports "broken" is worse than
+ * no register, because it trains everybody to ignore it.
+ *
+ * So there is one function, used by the writer here and by any verifier,
+ * taking a stored row and returning the hashed shape.
+ *
+ * Deliberately excluded: ids that do not exist yet at write time (sale_id),
+ * and timestamps, which SQLite fills in after the hash is computed.
+ */
+function serialEventFields(row) {
+  return {
+    serial_no: row.serial_no == null ? null : String(row.serial_no),
+    event: row.event_type == null ? null : String(row.event_type),
+    branchId: row.branch_id == null ? null : String(row.branch_id),
+    note: row.notes == null ? null : String(row.notes),
+  };
+}
+
+// ---------------------------------------------------------------------
+// BACKDATED SALES — `sold_at` IS A CLAIM ABOUT WHEN TRADE HAPPENED
+// ---------------------------------------------------------------------
+// A sale is not always recorded at the moment it happens. Two ordinary
+// situations break the assumption that `sold_at` means "now":
+//
+//   1. OFFLINE TILL. Power or network drops, the shop keeps trading, and the
+//      device syncs hours or days later. Stamping those sales with the sync
+//      time moves a whole day's takings onto the wrong day — and if that day's
+//      till was already counted and closed, the books no longer agree with the
+//      cash that was counted.
+//   2. A LATE ENTERED SALE. A delivery note signed on site, rung up at the
+//      branch the following morning.
+//
+// So `sold_at` is accepted from the caller. It is also GUARDED, because an
+// unbounded backdate is a fraud vector: posting today's cash sale into last
+// month's closed till is how takings disappear. The guard is a window rather
+// than a ban, which is the same shape as every other control in this system.
+const MAX_BACKDATE_DAYS = 90;
+const FUTURE_SKEW_MINUTES = 10;
+
+/**
+ * Validate and normalise a caller-supplied `sold_at`.
+ *
+ * ZONE HANDLING. This column stores WEST AFRICA TIME. A client may send either
+ * an instant (`2026-10-05T09:30:00.000Z`, or with an offset) or a bare
+ * wall-clock string in the stored format. An ISO string carrying a zone marker
+ * is an instant and is converted to WAT; a bare `YYYY-MM-DD HH:MM:SS` is taken
+ * as already being WAT, because that is what an offline till records and what
+ * the column holds. Guessing the other way would shift every synced sale by an
+ * hour and split one trading day across two.
+ *
+ * Returns { sql, day, backdated, minutesBack, today }. Never writes.
+ */
+/**
+ * True when a supplied sale time is not "now".
+ *
+ * The till always sends `sold_at`, including for the sale being rung up this
+ * minute. Treating every present stamp as a backdate refuses every staff sale.
+ * A stamp within the same future-skew window the engine already absorbs is the
+ * moment of sale. Anything further away is another time, and only a manager
+ * (or a signed offline replay) may record it.
+ */
+function isAnotherTime(rawSoldAt) {
+  if (rawSoldAt == null || String(rawSoldAt).trim() === '') return false;
+  const utc = claimedWatToUtcSql(rawSoldAt);
+  if (!utc) return false;
+  const gap = minutesBetween(utc, utcNow());
+  if (gap == null) return false;
+  return Math.abs(gap) > FUTURE_SKEW_MINUTES;
+}
+
+function resolveSoldAt(rawSoldAt, { user = null } = {}) {
+  const now = new Date();
+  const nowWatSql = watNow(now);
+  const today = nowWatSql.slice(0, 10);
+
+  if (rawSoldAt == null || String(rawSoldAt).trim() === '') {
+    return { sql: nowWatSql, day: today, backdated: false, minutesBack: 0, today };
+  }
+
+  const raw = String(rawSoldAt).trim();
+  const parsed = parseTimestamp(raw);
+  if (!parsed) {
+    throw err(`The sale time "${raw}" could not be read. Send it as "YYYY-MM-DD HH:MM:SS" (West Africa Time) or as an ISO-8601 timestamp.`, 'SOLD_AT_INVALID', 400);
+  }
+
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw);
+  const sql = hasZone ? utcToWat(raw) : parsed.toISOString().slice(0, 19).replace('T', ' ');
+  if (!sql) throw err(`The sale time "${raw}" could not be converted to West Africa Time.`, 'SOLD_AT_INVALID', 400);
+
+  const day = sql.slice(0, 10);
+  const minutesBack = minutesBetween(sql, nowWatSql) || 0;
+
+  if (minutesBack < -FUTURE_SKEW_MINUTES) {
+    // Device clocks in the field drift, and a till with a wrong clock should
+    // not be unable to sell. A few minutes of forward skew is absorbed;
+    // anything more is a mistake worth surfacing rather than storing.
+    throw err(`That sale is stamped ${Math.abs(minutesBack)} minutes in the future, beyond the ${FUTURE_SKEW_MINUTES}-minute tolerance for device clock drift. Correct the device clock or the sale time.`, 'SOLD_AT_IN_FUTURE', 400);
+  }
+
+  const daysBack = Math.floor(Math.max(0, minutesBack) / 1440);
+  if (daysBack > MAX_BACKDATE_DAYS && !(user && atLeast(user.role, 'MANAGER'))) {
+    throw err(`That sale is ${daysBack} days old, beyond the ${MAX_BACKDATE_DAYS}-day backdating window for your role. Ask a manager to enter it, so the delay becomes somebody's recorded decision rather than a silent one.`, 'SOLD_AT_TOO_OLD', 400);
+  }
+
+  return { sql, day, backdated: day !== today, minutesBack: Math.max(0, minutesBack), today };
+}
+
+async function complete(db, params) {
+  const {
+    branch, business, user, settings, scope,
+    customer = null, customerClass = null, priceLists = [],
+    lines, saleType = 'RETAIL', payments = [],
+    discountAmount = 0, discountReason = null,
+    deliveryFee = 0, deliveryRequired = false, deliveryAddress = null,
+    notes = null, tillSessionId = null, manualPriceOverrides = {},
+    creditOverrideReason = null, changeOwedAmount = 0,
+    deviceId = null, soldAt = null,
+    tradeModes = null, releaseAgreementId = null,
+    walkInName = null, walkInPhone = null,
+    settlement: requestedSettlement = null,
+    claimCode: suppliedClaimCode = null,
+    claimAlreadyRedeemed = false,
+    offlineReplay = false,
+    stockHolds = null,
+    allowReservedSerials = null,
+  } = params;
+
+  // Resolved before anything else: which till this sale belongs to depends on
+  // WHEN it happened, not on when it is being typed in.
+  const sold = resolveSoldAt(soldAt, { user });
+  const terms = resolveSaleTerm({
+    business, requested: requestedSettlement, saleType, payments,
+  });
+  if (!terms.ok) throw err(terms.error, terms.code, 400);
+  const recordedType = terms.saleType;
+  const settlement = terms.term;
+
+  const prepared = await prepare(db, {
+    branch, business, customer, customerClass, priceLists, lines, user, settings,
+    saleType: recordedType, settlement, tillSessionId, discountAmount, discountReason, deliveryFee,
+    deliveryRequired, deliveryAddress, notes, manualPriceOverrides,
+    tradeModes, releaseAgreementId, walkInName, walkInPhone,
+    stockHolds, allowReservedSerials,
+  });
+
+  const totals = prepared.totals;
+  const isCredit = prepared.isCredit;
+
+  // ---- credit authority, evaluated BEFORE any write
+  let creditInfo = null;
+  let nextBatch = null;
+  if (isCredit) {
+    if (!customer) throw err('A credit sale needs a customer — the debt has to belong to somebody the system can find later.', 'CUSTOMER_REQUIRED_FOR_CREDIT');
+    const currentBalance = Number(customer.credit_balance) || 0;
+    const canOverride = canOverrideCreditLimit(settings, user).allowed;
+    const staffCheck = canSellOnCredit(settings, user, { amount: totals.balanceDueAmount || totals.total, customerBalance: currentBalance, creditLimit: Number(customer.credit_limit) || 0 });
+    if (!staffCheck.allowed) throw err(staffCheck.reason, 'CREDIT_NOT_ALLOWED', 403);
+
+    creditInfo = creditDecision({
+      customer, currentBalance, requestedAmount: totals.total,
+      canOverride, overrideReason: creditOverrideReason, settings,
+    });
+    if (creditInfo.decision === 'REQUIRE_OVERRIDE') {
+      throw err(creditInfo.message, 'CREDIT_LIMIT_EXCEEDED', 403);
+    }
+    if (creditInfo.decision === 'WARN' && !creditOverrideReason) {
+      // The override is allowed but the REASON was not given. Recording an
+      // over-limit sale without a reason is the difference between an
+      // auditable judgement call and an unexplained hole — so the reason is
+      // required, not optional.
+      const e = err(`${creditInfo.message} Record why this was approved so the owner can review it.`, 'CREDIT_OVERRIDE_REASON_REQUIRED', 400);
+      e.creditInfo = creditInfo;
+      throw e;
+    }
+
+    // THE NEXT BATCH, not a second ledger. The open figure is the balance
+    // already on this customer. A cash sale never reaches this block.
+    let plantOverrides = null;
+    if (business && business.profile_overrides_json) {
+      try { plantOverrides = JSON.parse(business.profile_overrides_json); } catch (e) { plantOverrides = null; }
+    }
+    const plantProfile = resolveProfile(business && business.profile_code, plantOverrides);
+    nextBatch = nextBatchHold({
+      enabled: Boolean(plantProfile && plantProfile.creditUntilPaid),
+      openBalance: currentBalance,
+      isCredit: true,
+      canOverride,
+      overrideReason: creditOverrideReason,
+      customerName: customer.name,
+    });
+    if (nextBatch.held && nextBatch.decision === 'REQUIRE_OVERRIDE') {
+      throw err(nextBatch.message, 'NEXT_BATCH_HELD', 403);
+    }
+    if (nextBatch.held) {
+      const e = err(nextBatch.message, 'NEXT_BATCH_HELD', 400);
+      e.creditInfo = creditInfo;
+      throw e;
+    }
+  }
+
+  // ---- change owed, resolved BEFORE the payments are validated
+  //
+  // Order matters here. How much money the customer is expected to hand over
+  // depends on how much of it the till is going to owe straight back, so
+  // validating payments first reports a perfectly ordinary "paid ₦3,000 for a
+  // ₦2,500 sale, ₦500 owed back" as a ₦500 overpayment.
+  let changeOwed = round2(Math.max(0, Number(changeOwedAmount) || 0));
+  // A sale already taken offline may have recorded the notes the customer handed
+  // over, and nothing else. Refusing it as an overpayment leaves that cash in the
+  // drawer with no claim. Hold the difference and issue a code.
+  const tenderedPreview = round2((payments || []).reduce((sum, leg) => {
+    const method = String((leg && leg.method) || '').toUpperCase();
+    if (method === 'CREDIT') return sum;
+    return sum + (Number(leg && leg.amount) || 0);
+  }, 0));
+  if (changeOwed <= 0 && offlineReplay && tenderedPreview > round2(prepared.totals.total + 0.009)) {
+    changeOwed = round2(tenderedPreview - prepared.totals.total);
+  }
+  const holderName = String((customer && customer.name) || walkInName || (offlineReplay ? 'Walk-in customer' : '')).trim();
+  if (changeOwed > 0 && holderName.length < 2) {
+    throw err('Change owed needs a name the cashier can read back when the customer comes for the money. Put the customer on the sale, or type their name, and a collection code is printed on the receipt.', 'CHANGE_OWED_NEEDS_NAME');
+  }
+  if (changeOwed > prepared.totals.total && !offlineReplay) throw err('Change owed cannot exceed the sale total.', 'CHANGE_OWED_EXCEEDS_TOTAL');
+  const expiryDays = Number(settings.change_owed_expiry_days) || 30;
+  const claimExpiresAt = changeOwed > 0 ? expiryDate(expiryDays) : null;
+  const claimCode = changeOwed > 0 ? await reserveClaimCode(db, suppliedClaimCode) : null;
+  const claimRedeemed = changeOwed > 0 && Boolean(claimAlreadyRedeemed);
+
+
+  // A buyout is a sale of a unit that is already out. The deposit was credited
+  // to 2220 when it was taken. It has to leave that liability now, or the
+  // books still say the customer’s money is held after they have bought the unit.
+  const buyoutIds = [...new Set(prepared.lines.filter((line) => line.buyout && line.agreementId).map((line) => String(line.agreementId)))];
+  let depositApplied = 0;
+  let buyoutDeposits = [];
+  if (buyoutIds.length) {
+    buyoutDeposits = await db.all(
+      `SELECT id, deposit_held, deposit_method FROM asset_agreements
+        WHERE is_deleted = 0 AND status = 'OUT' AND id IN (${buyoutIds.map(() => '?').join(',')})`,
+      buyoutIds,
+    );
+    const held = round2(buyoutDeposits.reduce((sum, row) => sum + Number(row.deposit_held || 0), 0));
+    const total = round2(prepared.totals.total);
+    depositApplied = round2(Math.min(held, total));
+    const dueNow = round2(Math.max(0, total - depositApplied));
+    if (held > 0 && Math.abs(tenderedPreview - dueNow) > 0.05) {
+      throw err(
+        `This buyout is ₦${total.toLocaleString('en-NG')}. ₦${held.toLocaleString('en-NG')} is already held as a deposit, so take ₦${dueNow.toLocaleString('en-NG')} now. The deposit comes off the liability and is not taken again.`,
+        'BUYOUT_DEPOSIT',
+      );
+    }
+  }
+
+  const paymentResult = validatePayments({
+    payments, totals, saleType: prepared.saleType, isCredit, settings, user, customer, creditInfo, changeOwed,
+    depositHeld: prepared.depositDue || 0,
+    depositApplied,
+  });
+
+  // ---- till check
+  //
+  // For a sale recorded NOW this is the branch's open till. For a BACKDATED
+  // sale it is the till that was open THEN, found by time range — attaching
+  // Tuesday's sale to Thursday's open till puts the money in the wrong drawer
+  // and makes Thursday's count short by exactly that amount.
+  //
+  // A backdated sale whose till has since been CLOSED still references it (the
+  // money WAS counted in that session) but must not alter its counters: a
+  // counted, signed-off till is a historical record, and silently moving its
+  // totals afterwards is how a reconciliation stops meaning anything. Such a
+  // sale is flagged `latePosting` so the difference is visible rather than
+  // absorbed, while the ledger still records the revenue where it belongs.
+  let till = null;
+  let latePosting = false;
+  if (tillSessionId) {
+    till = await db.first('SELECT * FROM till_sessions WHERE id = ? AND is_deleted = 0', [String(tillSessionId)]);
+    if (!till) throw err('That till session does not exist.', 'TILL_NOT_FOUND', 404);
+    if (String(till.branch_id) !== String(branch.id)) throw err('That till belongs to a different branch.', 'TILL_WRONG_BRANCH', 403);
+    if (till.status !== 'OPEN') {
+      if (!sold.backdated) throw err('That till session is not open. Open a till before selling, or choose the current one.', 'TILL_NOT_OPEN', 409);
+      latePosting = true;
+    }
+  } else if (sold.backdated) {
+    // sold.sql is WEST AFRICA TIME; opened_at and closed_at are UTC from
+    // datetime('now'). Comparing them directly is out by an hour, which is
+    // exactly enough to pick the wrong session for a sale near the till's open
+    // or close boundary.
+    const soldUtc = watToUtc(sold.sql);
+    till = await db.first(`SELECT * FROM till_sessions
+        WHERE branch_id = ? AND is_deleted = 0 AND opened_at <= ?
+          AND (closed_at IS NULL OR closed_at >= ?)
+        ORDER BY opened_at DESC LIMIT 1`,
+    [String(branch.id), soldUtc, soldUtc]);
+    if (!till || till.status !== 'OPEN') latePosting = true;
+  } else {
+    till = await db.first("SELECT * FROM till_sessions WHERE branch_id = ? AND status = 'OPEN' AND is_deleted = 0 ORDER BY opened_at DESC LIMIT 1", [String(branch.id)]);
+    if (!till) latePosting = true;
+  }
+
+  // ---- PRE-COMPUTE everything that needs a read, BEFORE the transaction.
+  //
+  // The transaction collector contract (see server/lib/db.js) forbids
+  // awaiting a database read inside the write phase, because better-sqlite3
+  // cannot span a microtask and Turso HTTP has no interactive transaction at all.
+  // The receipt number and every serial's hash-chain link are therefore
+  // resolved here. This is safe under concurrency for the same reason the
+  // stock decrement below is: the receipt UNIQUE index and the chain's
+  // UNIQUE (serial_no, prev_hash) index both turn a lost race into a failed
+  // commit rather than a duplicate.
+  const receiptNo = await nextReceiptNo(db, branch.id);
+  // The GL account id map is a read, so it happens here rather than inside
+  // the transaction. Loading it once per sale (not per line) keeps the
+  // overhead to one indexed query.
+  const accountIds = await glService.loadAccountCodes(db, business.id);
+  // Warranty runs from the day the goods were SOLD, which for a backdated
+  // entry is not today. Starting the clock at entry time would silently
+  // shorten a customer's cover by however long the sync took.
+  const warrantyStart = sold.day;
+  const serialChains = new Map();
+  for (const line of prepared.lines) {
+    for (const serialRow of line.serialRows) {
+      const serialNo = String(serialRow.serial_no);
+      if (serialChains.has(serialNo)) continue;
+      const holdingSerial = trade.holdsStock(line.channel) && !line.buyout;
+      const eventType = holdingSerial ? 'STATUS_CHANGE' : 'SOLD';
+      const warrantyMonths = holdingSerial ? 0 : (Number(line.product.warranty_months) || 0);
+      const prevHash = await serialHeadHash(db, serialNo);
+      const note = holdingSerial
+        ? `${line.channel === 'LEASE' ? 'Leased' : 'Hired'} on receipt ${receiptNo}. Still ours.`
+        : `Sold on receipt ${receiptNo}`;
+      const rowHash = await computeRowHash(prevHash, {
+        ...serialEventFields({ serial_no: serialNo, event_type: eventType, branch_id: branch.id, notes: note }),
+        // The sale id is not yet known (it is generated inside the
+        // transaction), so it is NOT part of the hash. Hashing an id that
+        // does not exist yet would make the chain unreproducible by a
+        // verifier reading the stored row, which defeats the purpose.
+      });
+      serialChains.set(serialNo, {
+        eventId: newId(),
+        prevHash,
+        rowHash,
+        note,
+        eventType,
+        toStatus: holdingSerial ? 'RESERVED' : 'SOLD',
+        warrantyStart: holdingSerial ? null : warrantyStart,
+        warrantyEnd: warrantyMonths > 0 ? addMonths(warrantyStart, warrantyMonths) : null,
+      });
+    }
+  }
+
+  const controlledHead = prepared.lines.some((l) => l.dispense && (l.dispense.prescription || l.dispense.kyc))
+    ? await controlledHeadHash(db, branch.id)
+    : null;
+  const licenceRows = await db.all(
+    `SELECT record_type, record_number FROM branch_compliance_records
+      WHERE branch_id = ? AND is_deleted = 0 AND record_number IS NOT NULL
+        AND record_type IN ('PCN', 'NAFDAC_PREMISES', 'SUPERINTENDENT')`,
+    [String(branch.id)],
+  ).catch(() => []);
+  const branchLicences = {};
+  for (const row of licenceRows || []) {
+    if (row.record_number) branchLicences[String(row.record_type)] = String(row.record_number);
+  }
+  // A copy, not the map prepare() mutates. Paying a bill sells the units it
+  // held and drops that reservation in the same statement.
+  const consumeHold = new Map();
+  for (const h of stockHolds || []) {
+    const id = String((h && (h.batchId || h.batch_id)) || '');
+    const qty = Number(h && (h.quantityBase != null ? h.quantityBase : h.quantity_base));
+    if (!id || !(qty > 0)) continue;
+    consumeHold.set(id, roundTo((consumeHold.get(id) || 0) + qty, 4));
+  }
+
+  let saleNotes = notes || null;
+  if (nextBatch && nextBatch.released && creditOverrideReason) {
+    const line = `Next batch released while ₦${Number(nextBatch.openBalance).toLocaleString('en-NG')} was still unpaid: ${creditOverrideReason}`;
+    saleNotes = saleNotes ? `${saleNotes}\n${line}` : line;
+  }
+
+  return db.transaction(async (tx) => {
+    const saleId = tx.idFor('sale');
+    let controlledPrev = controlledHead;
+    const vat = vatEnabledTotals(totals, settings);
+
+    // ---- sales header
+    tx.queue(`INSERT INTO sales (
+        id, business_id, branch_id, till_session_id, receipt_no, customer_id, customer_name, customer_phone,
+        sale_type, settlement, salesperson_id, status, subtotal, discount_amount, order_discount_amount, discount_reason,
+        vat_enabled, vat_rate_percent, vat_amount, total, amount_paid, balance_due,
+        cash_tendered, change_given, payment_method, currency_code, due_date,
+        delivery_required, delivery_address, delivery_fee, notes, trade_mix, sold_at, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+      saleId, String(business.id), String(branch.id), till ? String(till.id) : null, receiptNo,
+      customer ? String(customer.id) : null,
+      customer ? customer.name : (params.walkInName || null),
+      customer ? customer.phone : (params.walkInPhone || null),
+      prepared.saleType, settlement, String(user.id),
+      // Status is always COMPLETED at insert time. A sale awaiting delivery is
+      // flipped to PENDING_DELIVERY by the delivery block below, once its job
+      // row exists — setting it here would leave a status pointing at a job
+      // that has not been written yet if anything between the two failed.
+      'COMPLETED',
+      totals.subtotal, totals.discountAmount, round2(totals.orderDiscount || 0), discountReason,
+      vat.vatEnabled, vat.vatRatePercent, vat.vatAmount,
+      // `total` is what the goods cost. Change owed does NOT reduce it: the sale
+      // happened at full price and the shop is holding money that belongs to the
+      // customer. Reducing the total would understate revenue and understate the
+      // liability at the same time.
+      totals.total, paymentResult.paid, round2(Math.max(0, totals.total - paymentResult.paid)),
+      // Tendered is what physically arrived (total + change owed); given is what
+      // went back over the counter.
+      round2(cashTenderedFrom(paymentResult.legs) || paymentResult.tendered), changeGivenFrom(paymentResult.legs),
+      dominantMethod(paymentResult.legs), 'NGN',
+      isCredit && paymentResult.balanceDue > 0 ? creditDueDate(customer, customerClass, settings) : null,
+      deliveryRequired ? 1 : 0, deliveryAddress || null, totals.deliveryFee,
+      latePosting
+        ? `${saleNotes ? saleNotes + ' | ' : ''}Late posting: recorded ${sold.minutesBack >= 1440 ? Math.floor(sold.minutesBack / 1440) + ' day(s)' : sold.minutesBack + ' minute(s)'} after the sale, against a till that was already counted.`
+        : (saleNotes || null),
+      prepared.tradeMix || null,
+      sold.sql,
+    ]);
+
+    // ---- lines, stock decrements, serials
+    for (const line of prepared.lines) {
+      const itemId = tx.idFor(`item-${line.index}`);
+      tx.queue(`INSERT INTO sale_items (
+          id, sale_id, product_id, variant_id, batch_id, category_id, product_name, sku, serial_no,
+          unit_code, quantity, quantity_in_base, unit_price, price_source, price_list_id,
+          discount_amount, discount_reason, vat_amount, line_total, cost_price_snapshot, margin, margin_pct, notes, channel,
+          created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+        itemId, saleId, String(line.productId), line.variantId ? String(line.variantId) : null,
+        line.picks[0] ? line.picks[0].batchId : null,
+        line.categoryId ? String(line.categoryId) : null,
+        line.productName, line.sku,
+        line.requestedSerials.length === 1 ? line.requestedSerials[0] : null,
+        line.unitCode, line.quantity, line.quantityInBase, line.unitPrice, line.priceSource,
+        line.priceListId ? String(line.priceListId) : null,
+        line.discountAmount, line.discountReason || null, line.vatAmount, line.lineTotal,
+        line.costPriceSnapshot, line.margin, line.marginPct, line.notes || null, line.channel || 'RETAIL',
+      ]);
+
+      if (line.dispense && (line.dispense.prescription || line.dispense.kyc)) {
+        controlledPrev = await queueDispense(tx, {
+          line, saleId, itemId, user, branch, business, prevHash: controlledPrev,
+        });
+      }
+
+      // Stock decrement, one row per batch consumed.
+      //
+      // Each is a GUARDED update. If another transaction took the last of this
+      // batch between our read and our write, this affects 0 rows and the
+      // commit fails loudly rather than driving the quantity negative.
+      //
+      // The guard is `quantity - quantity_reserved >= ?`, not `quantity >= ?`.
+      // Reserved units are held by a layaway or an open delivery job: they are
+      // physically on the shelf but they are not for sale. The weaker guard
+      // happens to hold whenever prepare() has done its arithmetic correctly,
+      // which makes it a trap rather than a safety net — it depends on a
+      // distant function, and a layaway created concurrently between prepare
+      // and commit would break the stock_batches CHECK
+      // (quantity_reserved <= quantity) with a message that names a constraint
+      // rather than the reason. Guarding on what is actually SELLABLE makes the
+      // invariant local to the statement that needs it.
+      // A hire or a lease does not take the unit off the books. The agreement
+      // is what says it is promised. A sale, including a buyout, does.
+      if (!trade.holdsStock(line.channel) || line.buyout) {
+        for (const pick of line.picks) {
+          const held = Math.min(consumeHold.get(String(pick.batchId)) || 0, Number(pick.quantityBase) || 0);
+          if (held > 0.0001) {
+            consumeHold.set(String(pick.batchId), roundTo((consumeHold.get(String(pick.batchId)) || 0) - held, 4));
+            // Sell the units this bill already held, and release that hold in
+            // the same statement. A separate release would let another sale
+            // take them between the two writes.
+            tx.queue(
+              `UPDATE stock_batches
+                  SET quantity = quantity - ?,
+                      quantity_reserved = quantity_reserved - ?,
+                      status = CASE WHEN quantity - ? <= 0 THEN 'DEPLETED' ELSE status END,
+                      updated_at = datetime('now')
+                WHERE id = ? AND is_deleted = 0
+                  AND quantity_reserved >= ?
+                  AND quantity >= ?
+                  AND quantity - quantity_reserved + ? >= ?`,
+              [pick.quantityBase, held, pick.quantityBase, pick.batchId, held, pick.quantityBase, held, pick.quantityBase],
+            );
+          } else {
+            tx.queue(
+              `UPDATE stock_batches
+                  SET quantity = quantity - ?,
+                      status = CASE WHEN quantity - ? <= 0 THEN 'DEPLETED' ELSE status END,
+                      updated_at = datetime('now')
+                WHERE id = ? AND is_deleted = 0 AND quantity - quantity_reserved >= ?`,
+              [pick.quantityBase, pick.quantityBase, pick.batchId, pick.quantityBase],
+            );
+          }
+        }
+      }
+
+      // Serials: mark sold, start the warranty clock, and chain an event.
+      for (let s = 0; s < line.serialRows.length; s += 1) {
+        const serialRow = line.serialRows[s];
+        const serialNo = String(serialRow.serial_no);
+        const chain = serialChains.get(serialNo);
+        if (!chain) continue; // no chain prepared (should not happen); skip rather than break the chain
+
+        tx.queue(`UPDATE serial_numbers SET
+            status = ?, branch_id = ?, sale_id = ?, customer_id = ?,
+            sold_at = ?,
+            warranty_starts_at = ?, warranty_ends_at = ?,
+            updated_at = datetime('now')
+          WHERE id = ? AND is_deleted = 0 AND status IN ('IN_STOCK','RESERVED')`, [
+          chain.toStatus || 'SOLD', String(branch.id), saleId, customer ? String(customer.id) : null,
+          chain.toStatus === 'SOLD' ? sold.sql : null, chain.warrantyStart, chain.warrantyEnd, String(serialRow.id),
+        ]);
+
+        tx.queue(`INSERT INTO sale_serials (id, sale_id, sale_item_id, serial_id, serial_no, branch_id, created_at)
+                  VALUES (?,?,?,?,?,?, datetime('now'))`, [
+          newId(), saleId, itemId, String(serialRow.id), serialNo, String(branch.id),
+        ]);
+
+        tx.queue(`INSERT INTO serial_events (
+            id, serial_id, serial_no, event_type, from_status, to_status, branch_id,
+            reference_type, reference_id, actor_id, customer_id, notes, prev_hash, row_hash, created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))`, [
+          chain.eventId, String(serialRow.id), serialNo, chain.eventType || 'SOLD', serialRow.status, chain.toStatus || 'SOLD', String(branch.id),
+          'SALE', saleId, String(user.id), customer ? String(customer.id) : null,
+          chain.note, chain.prevHash, chain.rowHash,
+        ]);
+      }
+    }
+
+    // Any hold this sale was allowed to consume, and did not, goes back.
+    // Doing it here — and only for the quantity this bill held — does not
+    // touch a layaway or another bill on the same batch.
+    for (const [batchId, qty] of consumeHold) {
+      if (qty > 0.0001) {
+        tx.queue(
+          `UPDATE stock_batches
+              SET quantity_reserved = quantity_reserved - ?, updated_at = datetime('now')
+            WHERE id = ? AND is_deleted = 0 AND quantity_reserved >= ?`,
+          [qty, batchId, qty],
+        );
+      }
+    }
+
+    // ---- agreements
+    // One agreement per kind and window. A mixed cart with chairs for
+    // Saturday and a generator for a month is two agreements, both tied
+    // to this receipt so the money and the promise can be found together.
+    const groups = new Map();
+    for (const line of prepared.lines) {
+      if (!line.hold || !line.startsOn) continue;
+      const key = `${line.channel}|${line.startsOn}|${line.endsOn}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(line);
+    }
+    const agreementIds = [];
+    for (const group of groups.values()) {
+      const head = group[0];
+      const agreementId = newId();
+      agreementIds.push(agreementId);
+      const deposit = round2(group.reduce((a, l) => a + Number(l.deposit || 0), 0));
+      const fee = round2(group.reduce((a, l) => a + Number(l.lineTotal || 0), 0));
+      tx.queue(`INSERT INTO asset_agreements (
+          id, business_id, branch_id, customer_id, customer_name, customer_phone, sale_id,
+          kind, status, starts_on, ends_on, periods, period_unit, fee_total,
+          deposit_due, deposit_held, deposit_method, venue, notes, created_by, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,'OUT',?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+        agreementId, String(business.id), String(branch.id),
+        customer ? String(customer.id) : null,
+        customer ? customer.name : (params.walkInName || null),
+        customer ? customer.phone : (params.walkInPhone || null),
+        saleId,
+        head.channel === 'LEASE' ? 'LEASE' : 'HIRE',
+        head.startsOn, head.endsOn, head.periods || 1, head.periodUnit || (head.channel === 'LEASE' ? 'MONTH' : 'DAY'),
+        fee, deposit, deposit, dominantMethod(paymentResult.legs),
+        head.venue || null, notes || null, String(user.id),
+      ]);
+      group.forEach((line) => {
+        tx.queue(`INSERT INTO asset_agreement_lines (
+            id, agreement_id, product_id, variant_id, product_name, sku, quantity, quantity_in_base,
+            unit_code, rate, deposit, created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now'))`, [
+          newId(), agreementId, String(line.productId), line.variantId ? String(line.variantId) : null,
+          line.productName, line.sku || null, line.quantity, line.quantityInBase, line.unitCode || null,
+          line.rate || 0, line.deposit || 0,
+        ]);
+      });
+      tx.queue(`INSERT INTO asset_agreement_schedule (
+          id, agreement_id, period_no, due_on, amount, status, paid_at, sale_id, created_at, updated_at)
+        VALUES (?,?,1,?,?,'PAID', datetime('now'), ?, datetime('now'), datetime('now'))`, [
+        newId(), agreementId, head.startsOn, fee, saleId,
+      ]);
+      if (deposit > 0) {
+        const depositStatements = glService.postHeldDeposit({
+          business, branch, agreementId, amount: deposit,
+          method: dominantMethod(paymentResult.legs), user, accountIds,
+          description: `Deposit held on receipt ${receiptNo}. This is not income.`,
+        });
+        for (const statement of depositStatements) tx.queue(statement.sql, statement.params);
+      }
+    }
+    for (const line of prepared.lines) {
+      if (!line.continuation || !line.agreementId) continue;
+      tx.queue(`INSERT INTO asset_agreement_schedule (
+          id, agreement_id, period_no, due_on, amount, status, paid_at, sale_id, created_at, updated_at)
+        SELECT ?, ?, COALESCE(MAX(period_no), 0) + 1, ?, ?, 'PAID', datetime('now'), ?, datetime('now'), datetime('now')
+          FROM asset_agreement_schedule WHERE agreement_id = ?`, [
+        newId(), String(line.agreementId), sold.day, line.lineTotal, saleId, String(line.agreementId),
+      ]);
+    }
+    for (const line of prepared.lines) {
+      if (!line.buyout || !line.agreementId) continue;
+      tx.queue(`UPDATE asset_agreements SET status = 'BOUGHT_OUT', bought_out_sale_id = ?, deposit_held = 0, updated_at = datetime('now')
+                WHERE id = ? AND status = 'OUT' AND is_deleted = 0`, [saleId, String(line.agreementId)]);
+    }
+    const heldOnBuyout = round2(buyoutDeposits.reduce((sum, row) => sum + Number(row.deposit_held || 0), 0));
+    let refundLeft = round2(heldOnBuyout - depositApplied);
+    for (const row of buyoutDeposits) {
+      if (refundLeft <= 0) break;
+      const give = round2(Math.min(Number(row.deposit_held) || 0, refundLeft));
+      if (give <= 0) continue;
+      for (const statement of glService.postHeldDeposit({
+        business, branch, agreementId: row.id, amount: give,
+        method: row.deposit_method || 'CASH', user, accountIds, releasing: true,
+        description: 'Deposit paid back. The buyout price was less than the deposit held.',
+      })) tx.queue(statement.sql, statement.params);
+      refundLeft = round2(refundLeft - give);
+    }
+
+    // ---- payment legs
+    for (const leg of paymentResult.legs) {
+      tx.queue(`INSERT INTO sale_payments (
+          id, sale_id, branch_id, till_session_id, method, amount, reference, bank_name,
+          status, cash_tendered, change_given, recorded_by, notes, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+        newId(), saleId, String(branch.id), till ? String(till.id) : null,
+        leg.method, leg.amount, leg.reference || null, leg.bankName || null,
+        leg.status || 'CLEARED', leg.cashTendered, leg.changeGiven, String(user.id), leg.notes || null,
+      ]);
+    }
+
+    // ---- credit sale: debtor ledger + customer balance
+    //
+    // THE LEDGER RECORDS THE GROSS INVOICE, THEN THE PAYMENTS AGAINST IT.
+    //
+    // It used to post the charge NET of the cash part-payment (`amount =
+    // balanceDue`) and THEN post the part-payment again as a negative row. That
+    // subtracted the same money twice: on a ₦60,000 bill settled with ₦20,000
+    // cash the ledger ran to a balance of ₦20,000 while customers.credit_balance
+    // correctly said ₦40,000. Two figures on the same screen disagreeing, and
+    // the ledger — the one a debt collector works from — understated what every
+    // part-paying customer owed by exactly what they had already paid. The
+    // longer the relationship, the bigger the understatement, so the most
+    // loyal credit customers looked the closest to settled.
+    //
+    // A statement has to show the whole invoice and each payment against it,
+    // because that is the only form a customer can be argued with.
+    if (isCredit && customer) {
+      const prior = round2(Number(customer.credit_balance) || 0);
+      const afterCharge = round2(prior + totals.total);
+      const finalBalance = round2(prior + paymentResult.balanceDue);
+
+      if (paymentResult.balanceDue > 0) {
+        // `due_date` travels WITH the charge, computed from the same terms that
+        // produced `sales.due_date` a few lines above. Without it every ageing
+        // reader falls back to `created_at`, so "overdue" silently means "days
+        // since the sale" and the owner's grace setting means something different
+        // for every customer class. See migration 0004.
+        const dueDate = creditDueDate(customer, customerClass, settings);
+        tx.queue(`INSERT INTO debtor_ledger (
+            id, branch_id, business_id, customer_id, entry_type, reference_id, amount, balance_after, due_date, notes, created_by, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+          newId(), String(branch.id), String(business.id), String(customer.id), 'SALE', saleId,
+          totals.total, afterCharge, dueDate,
+          `Credit sale, receipt ${receiptNo}${creditOverrideReason ? `. Over limit: ${creditOverrideReason}` : ''}`,
+          String(user.id),
+        ]);
+      }
+
+      // Each real-money leg reduces the balance. A running total is kept so
+      // several legs on one sale each show the balance after THAT payment,
+      // which is what makes the statement readable when a customer pays cash
+      // and transfer against the same bill.
+      let running = afterCharge;
+      for (const leg of paymentResult.legs.filter((l) => l.method !== 'CREDIT')) {
+        running = round2(running - leg.amount);
+        tx.queue(`INSERT INTO debtor_ledger (
+            id, branch_id, business_id, customer_id, entry_type, reference_id, amount, balance_after, notes, created_by, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+          newId(), String(branch.id), String(business.id), String(customer.id), 'PAYMENT', saleId,
+          -leg.amount, running,
+          `Part payment on receipt ${receiptNo} by ${leg.method.replace(/_/g, ' ').toLowerCase()}`, String(user.id),
+        ]);
+      }
+
+      // The customer row must end on the ledger's final figure. If a fully
+      // settled credit sale is recorded, nothing was charged and the balance
+      // does not move — but the UPDATE still runs so the two cannot drift.
+      tx.queue("UPDATE customers SET credit_balance = ?, updated_at = datetime('now') WHERE id = ?",
+        [finalBalance, String(customer.id)]);
+    }
+
+    // ---- change owed
+    if (changeOwed > 0) {
+      tx.queue(`INSERT INTO change_owed (
+          id, branch_id, business_id, sale_id, customer_id, customer_name, customer_phone,
+          amount, claim_code, status, redeemed_at, redeemed_by, expires_at, created_by, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+        newId(), String(branch.id), String(business.id), saleId,
+        customer ? String(customer.id) : null,
+        holderName,
+        customer ? customer.phone : (walkInPhone || null),
+        changeOwed, claimCode,
+        claimRedeemed ? 'REDEEMED' : 'OUTSTANDING',
+        claimRedeemed ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
+        claimRedeemed ? String(user.id) : null,
+        claimExpiresAt, String(user.id),
+      ]);
+      if (claimRedeemed) {
+        for (const s of glService.postCashPayoutStatements({
+          businessId: String(business.id), branchId: String(branch.id), amount: changeOwed,
+          cash: 'TILL', accountCode: '2210', sourceType: 'SALE', sourceId: saleId,
+          description: `Change handed back before the sale synced, claim ${claimCode}`,
+          accountIds, user,
+        })) tx.queue(s.sql, s.params);
+      }
+    }
+
+    // ---- till counters
+    // Skipped for a late posting: that session was already counted and closed,
+    // so its totals are a signed-off historical record.
+    if (till && !latePosting) {
+      const byMethod = totalsByMethod(paymentResult.legs);
+      tx.queue(`UPDATE till_sessions SET
+          cash_sales_total = cash_sales_total + ?,
+          pos_total = pos_total + ?,
+          transfer_total = transfer_total + ?,
+          mobile_money_total = mobile_money_total + ?,
+          cheque_total = cheque_total + ?,
+          credit_total = credit_total + ?,
+          other_total = other_total + ?,
+          grand_total = grand_total + ?,
+          sale_count = sale_count + 1,
+          updated_at = datetime('now')
+        WHERE id = ?`, [
+        byMethod.CASH, byMethod.POS_TERMINAL, byMethod.BANK_TRANSFER, byMethod.MOBILE_MONEY,
+        byMethod.CHEQUE, byMethod.CREDIT, byMethod.OTHER, round2(totals.total - changeOwed), String(till.id),
+      ]);
+    }
+
+    // ---- general ledger
+    // The deposit cash is journaled on its own, to the liability. If it also
+    // rode in on this sale's payment legs, the revenue entry would debit cash
+    // it does not credit, and the books would not balance.
+    let depositLeft = round2(prepared.depositDue || 0);
+    const revenueLegs = paymentResult.legs.map((leg) => {
+      if (depositLeft <= 0 || leg.method === 'CREDIT') return leg;
+      const take = Math.min(Number(leg.amount) || 0, depositLeft);
+      depositLeft = round2(depositLeft - take);
+      return { ...leg, amount: round2((Number(leg.amount) || 0) - take) };
+    }).filter((leg) => Number(leg.amount) > 0);
+    const glStatements = glService.postSaleStatements({
+      saleId, business, branch, totals, vat, payments: revenueLegs,
+      lines: prepared.lines, isCredit, balanceDue: paymentResult.balanceDue,
+      changeOwed, user, receiptNo, customer, accountIds,
+      depositApplied, entryDate: sold.day,
+    });
+    for (const s of glStatements) tx.queue(s.sql, s.params);
+
+    // ---- delivery job, if requested
+    if (deliveryRequired) {
+      const jobId = tx.idFor('delivery');
+      // job_no is UNIQUE ACROSS THE WHOLE DEPLOYMENT (idx_delivery_job_no is not
+      // scoped to a branch), but receipt_no is only unique WITHIN a branch. The
+      // first version concatenated the receipt number alone, so the moment a
+      // second branch made a delivery sale whose receipt number matched one
+      // already used elsewhere, the insert died on a UNIQUE constraint — and it
+      // took the whole sale with it, because the job is written in the same
+      // transaction. Multi-branch is the core case for this product, so this was
+      // not an edge case: it was a collision waiting for branch two.
+      //
+      // Prefixing with the branch code keeps the number globally unique and
+      // still readable on a dispatch board, where "which branch" is the first
+      // question anybody asks.
+      const branchTag = String(branch.code || branch.id.slice(0, 4)).replace(/[^A-Za-z0-9]/g, '').slice(0, 10).toUpperCase();
+      const jobNo = `DLV-${branchTag}-${receiptNo}`;
+      const dropDue = round2(Math.max(0, paymentResult.balanceDue || 0));
+      const dropPaid = round2(paymentResult.paid || 0);
+      const dropLat = customer && customer.latitude != null && customer.latitude !== '' ? Number(customer.latitude) : null;
+      const dropLng = customer && customer.longitude != null && customer.longitude !== '' ? Number(customer.longitude) : null;
+      tx.queue(`INSERT INTO delivery_jobs (
+          id, job_no, branch_id, business_id, sale_id, customer_id, delivery_address, delivery_city,
+          delivery_state, status, fee, fee_collected, created_by,
+          supply_terms, goods_value, amount_paid, balance_due, txn_customer_name, txn_customer_phone,
+          latitude, longitude, settlement,
+          created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?, 'PENDING', ?, ?, ?, ?,?,?,?,?,?, ?,?,?, datetime('now'), datetime('now'))`, [
+        jobId, jobNo, String(branch.id), String(business.id), saleId,
+        customer ? String(customer.id) : null,
+        deliveryAddress || (customer && customer.address) || 'Address to be confirmed',
+        (customer && customer.city) || branch.city || null,
+        (customer && customer.state) || branch.state || null,
+        totals.deliveryFee, round2(totals.deliveryFee), String(user.id),
+        supplyTermsOf({ saleType: prepared.saleType, balanceDue: dropDue, amountPaid: dropPaid }),
+        round2(Math.max(0, (Number(totals.total) || 0) - (Number(totals.deliveryFee) || 0))),
+        dropPaid, dropDue,
+        customer ? customer.name : (params.walkInName || null),
+        customer ? customer.phone : (params.walkInPhone || null),
+        Number.isFinite(dropLat) ? dropLat : null,
+        Number.isFinite(dropLng) ? dropLng : null,
+        settlement,
+      ]);
+      for (const line of prepared.lines.filter((l) => Number(l.product.is_bulky) || l.quantityInBase > 0)) {
+        tx.queue(`INSERT INTO delivery_job_items (
+            id, delivery_job_id, sale_item_id, product_id, variant_id, quantity, quantity_in_base, unit_code, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+          newId(), jobId, tx.peek(`item-${line.index}`), String(line.productId),
+          line.variantId ? String(line.variantId) : null, line.quantity, line.quantityInBase, line.unitCode,
+        ]);
+      }
+      tx.queue("UPDATE sales SET status = 'PENDING_DELIVERY', updated_at = datetime('now') WHERE id = ?", [saleId]);
+    }
+
+    return {
+      ok: true,
+      saleId,
+      receiptNo,
+      branchId: String(branch.id),
+      branchCode: branch.code || null,
+      totals,
+      vat,
+      paid: paymentResult.paid,
+      balanceDue: paymentResult.balanceDue,
+      changeOwed,
+      claimCode,
+      claimExpiresAt,
+      creditInfo,
+      // Preparation warnings plus any the payment split raised. Dropping the
+      // payment advisories here would mean a sale recorded as "credit" but
+      // settled in full — which silently creates no debt — was never reported
+      // to anybody.
+      warnings: [...(prepared.warnings || []), ...(paymentResult.advisories || []).map((message) => ({ code: 'PAYMENT_ADVISORY', severity: 'WARN', message }))],
+      lineCount: prepared.lines.length,
+      tillSessionId: till ? String(till.id) : null,
+      soldAt: sold.sql,
+      // Surfaced so a caller (and the receipt printout) can say plainly that
+      // this sale landed after its till was counted, instead of the cashier
+      // discovering a shortfall they did not cause.
+      latePosting,
+      backdated: sold.backdated,
+      agreementIds,
+      depositHeld: round2(prepared.depositDue || 0),
+      tradeMix: prepared.tradeMix || null,
+      lines: receiptLines(prepared.lines),
+      licences: branchLicences,
+      settlement,
+      paper: paperOf({
+        settlement,
+        saleType: prepared.saleType,
+        balanceDue: paymentResult.balanceDue,
+        amountPaid: paymentResult.paid,
+      }),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------
+// HELPERS
+// ---------------------------------------------------------------------
+
+function vatEnabledTotals(totals, settings) {
+  const enabled = Boolean(Number(settings.vat_enabled));
+  return {
+    vatEnabled: enabled ? 1 : 0,
+    vatRatePercent: enabled ? Number(settings.vat_rate_percent) || 0 : 0,
+    vatAmount: enabled ? totals.vatAmount || 0 : 0,
+  };
+}
+
+function dominantMethod(legs) {
+  if (!legs.length) return 'CASH';
+  const byAmount = legs.reduce((acc, l) => { acc[l.method] = (acc[l.method] || 0) + Number(l.amount); return acc; }, {});
+  return Object.keys(byAmount).sort((a, b) => byAmount[b] - byAmount[a])[0];
+}
+
+function totalsByMethod(legs) {
+  const out = { CASH: 0, POS_TERMINAL: 0, BANK_TRANSFER: 0, MOBILE_MONEY: 0, USSD: 0, CHEQUE: 0, CREDIT: 0, OTHER: 0 };
+  for (const leg of legs) {
+    const key = out[leg.method] === undefined ? 'OTHER' : leg.method;
+    out[key] = round2(out[key] + Number(leg.amount));
+  }
+  // USSD and mobile money are the same rail for reconciliation purposes in
+  // Nigeria; folding USSD into MOBILE_MONEY keeps the till report to the
+  // categories a bank statement actually shows.
+  out.MOBILE_MONEY = round2(out.MOBILE_MONEY + out.USSD);
+  out.USSD = 0;
+  return out;
+}
+
+/**
+ * CASH HANDED BACK ACROSS THE COUNTER — derived, because nothing derived it.
+ *
+ * `sale_payments.change_given` and `sales.change_given` have existed since the first
+ * schema, and `changeGivenFrom()` has always read `leg.changeGiven` — but that field
+ * was only ever read from the REQUEST (`leg.change_given`), and the route's
+ * `normalisePayments()` never copied it out of the body. So no client could set it, and
+ * nothing computed it: EVERY cash sale in this system recorded ₦0 change given.
+ *
+ * What that costs is not the till's arithmetic — the drawer is reconciled from the
+ * payment AMOUNTS, which were always right. It is the argument afterwards. A customer
+ * tendered ₦35,500 for a ₦34,000 sale and the record said ₦0 went back; the cashier has
+ * no evidence for the ₦1,500 that left the drawer, and neither does the owner. This
+ * system exists to be that evidence.
+ *
+ * Found by test/audit/audit.money.js reading the sale back and finding a zero where the
+ * receipt in the customer's hand said ₦1,500.
+ *
+ * The arithmetic: what the customer handed over, less what was applied to the sale, less
+ * anything the till kept as change OWED. That last term matters and is the bug this
+ * function's sibling already documents: change GIVEN is cash that left the drawer, change
+ * OWED is cash that stayed in it, and lumping them together made every drawer that owed
+ * change look short by exactly that amount.
+ *
+ * A client that states a figure itself still wins — some counters hand back from a
+ * different drawer, and the person who was standing there outranks arithmetic.
+ */
+const CLAIM_CODE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/;
+
+function receiptLines(lines) {
+  return (lines || []).map((line) => {
+    const pick = (line.picks && line.picks[0]) || {};
+    return {
+      product_name: line.productName,
+      sku: line.sku || null,
+      variant_name: line.variant ? line.variant.name : null,
+      quantity: line.quantity,
+      unit_code: line.unitCode,
+      unit_price: line.unitPrice,
+      line_total: line.lineTotal,
+      line_discount: line.discountAmount || 0,
+      category_id: (line.product && line.product.category_id) || null,
+      category_code: (line.product && line.product.category_code) || null,
+      category_name: (line.product && line.product.category_name) || null,
+      nafdac_catalog_id: (line.product && line.product.nafdac_catalog_id) || null,
+      batch_no: pick.batchNo || null,
+      expiry_date: pick.expiryDate || pick.expiry || null,
+      registration_no: (line.product && line.product.registration_no) || null,
+      warranty_months: line.product ? Number(line.product.warranty_months) || 0 : 0,
+      serialNumbers: line.requestedSerials || [],
+      prescription: line.dispense && line.dispense.prescription ? line.dispense.prescription : null,
+      controlled_kyc: line.dispense && line.dispense.kyc ? line.dispense.kyc : null,
+    };
+  });
+}
+
+function expiryDate(days) {
+  const n = Math.max(0, Number(days) || 30);
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Keep a code the receipt already printed. A collision gets a fresh one. */
+async function reserveClaimCode(db, supplied) {
+  const wanted = String(supplied || '').trim().toUpperCase();
+  if (CLAIM_CODE.test(wanted)) {
+    const taken = await db.first('SELECT id FROM change_owed WHERE claim_code = ? AND is_deleted = 0', [wanted]);
+    if (!taken) return wanted;
+  }
+  for (let i = 0; i < 6; i += 1) {
+    const next = shortCode(8);
+    const taken = await db.first('SELECT id FROM change_owed WHERE claim_code = ? AND is_deleted = 0', [next]);
+    if (!taken) return next;
+  }
+  return shortCode(8);
+}
+
+function deriveChangeGiven(legs, changeOwed) {
+  const cashLegs = legs.filter((l) => l.method === 'CASH');
+  if (!cashLegs.length) return legs;
+  if (cashLegs.some((l) => l.changeGiven != null)) return legs; // the client said; do not override
+  const tendered = round2(cashLegs.reduce((a, l) => a + Number(l.cashTendered || 0), 0));
+  if (tendered <= 0) return legs;
+  const applied = round2(cashLegs.reduce((a, l) => a + Number(l.amount || 0), 0));
+  const given = round2(Math.max(0, tendered - applied - (Number(changeOwed) || 0)));
+  cashLegs[0].changeGiven = given;
+  return legs;
+}
+
+function cashTenderedFrom(legs) {
+  const cash = legs.find((l) => l.method === 'CASH');
+  return cash && cash.cashTendered != null ? cash.cashTendered : 0;
+}
+
+/**
+ * Cash handed BACK over the counter.
+ *
+ * This used to add `changeOwed` in, conflating two opposite facts: change GIVEN
+ * is cash that left the drawer, change OWED is cash that stayed in it and became
+ * a liability. Adding them made the till reconciliation short by exactly the
+ * amount owed, and the cashier could not tell whether the drawer was wrong or
+ * the claim book was.
+ */
+function changeGivenFrom(legs) {
+  const cash = legs.find((l) => l.method === 'CASH');
+  return round2(cash && cash.changeGiven != null ? cash.changeGiven : 0);
+}
+
+function creditDueDate(customer, customerClass, settings) {
+  const { creditTerms } = require('../../domain/credit');
+  return creditTerms({ customer, customerClass, settings }).dueDate;
+}
+
+async function serialHeadHash(db, serialNo) {
+  const row = await db.first(
+    'SELECT row_hash FROM serial_events WHERE serial_no = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+    [String(serialNo)],
+  );
+  return row ? row.row_hash : null;
+}
+
+// ---------------------------------------------------------------------
+// VOID
+// ---------------------------------------------------------------------
+/**
+ * Void a completed sale.
+ *
+ * A void is NOT a delete. The sale row stays with status VOIDED, stock is
+ * restored, the till counters are reversed, the ledger is reversed by a
+ * compensating entry rather than by removal, and the reason and actor are
+ * recorded. Deleting it would be the single most destructive thing this
+ * system could do: it would remove the evidence that the sale ever happened,
+ * which is exactly what a fraudulent void is trying to achieve.
+ */
+async function voidSale(db, { saleId, user, settings, reason, scope, restoreStock = true }) {
+  if (!reason || String(reason).trim().length < 4) {
+    throw err('Give a reason for the void. It is recorded and reviewed — "wrong item" and "customer changed their mind" are different conversations.', 'VOID_REASON_REQUIRED');
+  }
+  const sale = await db.first('SELECT * FROM sales WHERE id = ? AND is_deleted = 0', [String(saleId)]);
+  if (!sale) throw err('That sale does not exist.', 'SALE_NOT_FOUND', 404);
+  if (sale.status === 'VOIDED') throw err('That sale is already voided.', 'ALREADY_VOIDED', 409);
+
+  // ---- THE VOID WINDOW, AND TWO BUGS THAT USED TO LIVE HERE
+  //
+  // `sales.sold_at` is stored in WEST AFRICA TIME. The first version of this
+  // line compared it against `new Date().toISOString()` — UTC — and then took
+  // `Math.abs()` of the result. Those two mistakes compounded into an
+  // INVERTED window:
+  //
+  //   sale made  1 minute ago -> elapsed = 1 - 60 = -59 -> abs = 59 -> REFUSED
+  //   sale made 75 minutes ago-> elapsed = 75 - 60 =  15 -> abs = 15 -> ALLOWED
+  //
+  // So the one thing the allowance exists for — a cashier correcting a
+  // mis-keyed sale at a busy counter — was blocked, while the thing it exists
+  // to prevent — walking away and voiding a cash sale an hour later to pocket
+  // the note — was permitted. The `abs()` looked like a defence against clock
+  // skew but is the wrong direction of defence: it converts "timestamped in
+  // the future" into "very old", which is the permissive reading.
+  //
+  // Now: compare in one zone (WAT), never abs, and clamp a negative elapsed
+  // to zero — a sale stamped in the future is by definition not an old sale,
+  // and clock skew should cost a cashier nothing.
+  const minutesSince = minutesBetween(sale.sold_at, watNow());
+  const elapsed = minutesSince == null ? null : Math.max(0, minutesSince);
+  const authority = canVoidSale(settings, user, sale, { nowMinutesSinceSale: elapsed });
+  if (!authority.allowed) throw err(authority.reason, 'VOID_NOT_ALLOWED', 403);
+
+  if (scope && !scope.allBranches && String(sale.branch_id) !== String(user.branch_id)) {
+    throw err('That sale belongs to another branch. You can only void sales from the branch you are signed in to.', 'BRANCH_SCOPE_VIOLATION', 403);
+  }
+
+  const items = await db.all('SELECT * FROM sale_items WHERE sale_id = ? AND is_deleted = 0', [String(saleId)]);
+  const serials = await db.all('SELECT * FROM sale_serials WHERE sale_id = ?', [String(saleId)]);
+  const ledger = await db.all("SELECT * FROM debtor_ledger WHERE reference_id = ? AND entry_type = 'SALE' AND is_deleted = 0", [String(saleId)]);
+  const customer = sale.customer_id ? await db.first('SELECT * FROM customers WHERE id = ?', [String(sale.customer_id)]) : null;
+  const till = sale.till_session_id ? await db.first('SELECT * FROM till_sessions WHERE id = ?', [String(sale.till_session_id)]) : null;
+  const accountIds = await glService.loadAccountCodes(db, sale.business_id);
+  const openedHere = await db.all(
+    'SELECT * FROM asset_agreements WHERE sale_id = ? AND is_deleted = 0',
+    [String(saleId)],
+  );
+  const boughtHere = await db.all(
+    'SELECT id FROM asset_agreements WHERE bought_out_sale_id = ? AND is_deleted = 0',
+    [String(saleId)],
+  );
+  if (boughtHere.length) {
+    throw err('This receipt bought goods out of a lease. The buyout has to be undone from the hire book before the receipt can be voided.', 'BUYOUT_NOT_VOIDABLE', 409);
+  }
+  if (openedHere.some((row) => row.status === 'RETURNED' || row.status === 'BOUGHT_OUT')) {
+    throw err('Goods on this receipt have already come back, or been bought. A void would pretend they were never out.', 'AGREEMENT_ALREADY_CLOSED', 409);
+  }
+  const depositBack = round2(openedHere
+    .filter((row) => row.status === 'OUT')
+    .reduce((sum, row) => sum + (Number(row.deposit_held) || 0), 0));
+
+  const registerTable = await db.first("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'controlled_substance_register'");
+  const registerRows = registerTable
+    ? await db.all(
+      `SELECT * FROM controlled_substance_register
+        WHERE sale_id = ? AND entry_type = 'DISPENSE' AND is_deleted = 0
+        ORDER BY created_at, id`,
+      [String(saleId)],
+    )
+    : [];
+  const voidHead = registerRows.length ? await controlledHeadHash(db, sale.branch_id) : null;
+
+  return db.transaction(async (tx) => {
+    tx.queue(`UPDATE sales SET status = 'VOIDED', voided_at = datetime('now'), voided_by = ?, void_reason = ?, updated_at = datetime('now') WHERE id = ?`,
+      [String(user.id), String(reason).slice(0, 500), String(saleId)]);
+
+    // The register is append-only. A void adds a VOID row. It does not delete
+    // the dispense, because a deleted row is a register nobody can audit.
+    let voidPrev = voidHead;
+    for (const row of registerRows) {
+      const fields = {
+        entry_type: 'VOID',
+        business_id: String(row.business_id),
+        branch_id: String(row.branch_id),
+        product_id: String(row.product_id),
+        quantity_dispensed: Number(row.quantity_dispensed),
+        buyer_name: row.buyer_name,
+        buyer_phone: row.buyer_phone,
+        buyer_id_type: row.buyer_id_type || null,
+        buyer_id_number: row.buyer_id_number || null,
+        dispensed_by: String(user.id),
+        sale_id: String(saleId),
+        sale_item_id: row.sale_item_id ? String(row.sale_item_id) : null,
+        prescription_id: row.prescription_id || null,
+        notes: String(reason).slice(0, 500),
+      };
+      const entryHash = await computeRowHash(voidPrev, fields);
+      tx.queue(`INSERT INTO controlled_substance_register (
+          id, business_id, branch_id, sale_id, sale_item_id, product_id, entry_type,
+          quantity_dispensed, buyer_name, buyer_phone, buyer_id_type, buyer_id_number,
+          prescription_id, dispensed_by, notes, prev_hash, entry_hash, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))`, [
+        tx.idFor(`void-ctl-${row.id}`),
+        fields.business_id, fields.branch_id, fields.sale_id, fields.sale_item_id, fields.product_id, fields.entry_type,
+        fields.quantity_dispensed, fields.buyer_name, fields.buyer_phone, fields.buyer_id_type, fields.buyer_id_number,
+        fields.prescription_id, fields.dispensed_by, fields.notes, voidPrev, entryHash,
+      ]);
+      voidPrev = entryHash;
+    }
+
+    if (restoreStock) {
+      for (const item of items) {
+        if (!item.batch_id) continue;
+        // Restoring to the ORIGINAL batch keeps cost and price history
+        // intact. Restoring to a new batch would value the returned stock at
+        // today's cost rather than the cost it was actually bought at, and
+        // the margin on its next sale would be fiction.
+        tx.queue(`UPDATE stock_batches SET
+            quantity = quantity + ?,
+            status = CASE WHEN status = 'DEPLETED' THEN 'ACTIVE' ELSE status END,
+            updated_at = datetime('now')
+          WHERE id = ? AND is_deleted = 0`, [item.quantity_in_base, String(item.batch_id)]);
+      }
+    }
+
+    for (const s of serials) {
+      tx.queue(`UPDATE serial_numbers SET status = 'IN_STOCK', sale_id = NULL, sold_at = NULL,
+          warranty_starts_at = NULL, warranty_ends_at = NULL, branch_id = ?, updated_at = datetime('now')
+        WHERE id = ?`, [String(sale.branch_id), String(s.serial_id)]);
+      tx.queue('DELETE FROM sale_serials WHERE id = ?', [String(s.id)]);
+    }
+
+    // Reverse the debtor ledger with a compensating entry, never by deleting
+    // the original: the original is the record that the credit was extended,
+    // and erasing it would make the customer's history look as though they
+    // had never been trusted at all.
+    for (const entry of ledger) {
+      const newBalance = customer ? round2((Number(customer.credit_balance) || 0) - Number(entry.amount)) : 0;
+      tx.queue(`INSERT INTO debtor_ledger (id, branch_id, business_id, customer_id, entry_type, reference_id, amount, balance_after, notes, created_by, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))`, [
+        newId(), String(sale.branch_id), String(sale.business_id), String(sale.customer_id), 'ADJUSTMENT', saleId,
+        -Number(entry.amount), Math.max(0, newBalance), `Reversal of voided sale, receipt ${sale.receipt_no}: ${reason}`, String(user.id),
+      ]);
+      if (customer) tx.queue("UPDATE customers SET credit_balance = MAX(0, credit_balance - ?), updated_at = datetime('now') WHERE id = ?", [Number(entry.amount), String(customer.id)]);
+    }
+
+    if (till && till.status === 'OPEN') {
+      tx.queue(`UPDATE till_sessions SET
+          grand_total = MAX(0, grand_total - ?),
+          cash_sales_total = MAX(0, cash_sales_total - ?),
+          sale_count = MAX(0, sale_count - 1),
+          void_count = void_count + 1,
+          updated_at = datetime('now')
+        WHERE id = ?`, [Number(sale.total), round2(Number(sale.total) + depositBack), String(till.id)]);
+    } else if (till && till.status === 'CLOSED') {
+      // A void against a CLOSED till cannot silently rewrite a reconciled
+      // day. It is allowed (the goods genuinely came back) but recorded so
+      // the owner knows a closed day's figures no longer match the till
+      // sheet that was signed off.
+      tx.queue(`UPDATE till_sessions SET void_count = void_count + 1, notes = COALESCE(notes,'') || ?, updated_at = datetime('now') WHERE id = ?`,
+        [` [Voided after close: receipt ${sale.receipt_no} on ${new Date().toISOString().slice(0, 10)}]`, String(till.id)]);
+    }
+
+    for (const s of glService.reverseSaleStatements({ sale, items, business: { id: sale.business_id }, branch: { id: sale.branch_id }, user, reason, accountIds })) {
+      tx.queue(s.sql, s.params);
+    }
+    for (const agreement of openedHere) {
+      if (agreement.status !== 'OUT') continue;
+      tx.queue(`UPDATE asset_agreements SET status = 'CANCELLED', updated_at = datetime('now') WHERE id = ? AND status = 'OUT'`, [String(agreement.id)]);
+      if (Number(agreement.deposit_held) > 0) {
+        const branchRow = { id: sale.branch_id };
+        const businessRow = { id: sale.business_id };
+        for (const s of glService.postHeldDeposit({
+          business: businessRow, branch: branchRow, agreementId: agreement.id,
+          amount: agreement.deposit_held, method: agreement.deposit_method || 'CASH',
+          user, accountIds, releasing: true,
+          description: `Deposit returned because receipt ${sale.receipt_no} was voided.`,
+        })) tx.queue(s.sql, s.params);
+      }
+    }
+
+    return { ok: true, saleId: String(saleId), receiptNo: sale.receipt_no, restoredStock: restoreStock, itemsReversed: items.length };
+  });
+}
+
+module.exports = {
+  SALE_TYPES, PAYMENT_METHODS,
+  prepare, complete, voidSale, validatePayments, totalsByMethod, dominantMethod, isAnotherTime,
+  serialEventFields, serialHeadHash, reserveClaimCode, expiryDate,
+};

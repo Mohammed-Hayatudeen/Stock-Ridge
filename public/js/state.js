@@ -1,0 +1,682 @@
+// =====================================================================
+// public/js/state.js — WHO IS SIGNED IN, AND WHICH SHOP THEY ARE IN
+// =====================================================================
+// Two facts drive every screen in this app:
+//
+//   * WHO   — the user, their role, and the navigation that role is allowed.
+//   * WHERE — the active business and the active branch.
+//
+// The second one is the dangerous one. A manager pinned to the Ikeja branch must
+// not be able to look at the Abuja branch by editing a URL, so the branch
+// selection here is only ever a CHOSEN value WITHIN what `/api/auth/me` said is
+// permitted. The server re-derives its own scope on every request regardless —
+// this is a convenience, not the guard — but a UI that offered a branch the
+// server would refuse produces a confusing 403 instead of a working screen, so
+// the list is filtered client-side too.
+// =====================================================================
+(function (global) {
+  const SR = global.SR = global.SR || {};
+
+  const ACTIVE_BRANCH_KEY = 'sr.activeBranch';
+  const ACTIVE_BUSINESS_KEY = 'sr.activeBusiness';
+  // A remembered id of null is "nothing stored yet", which resolveActive treats as
+  // "pick one". All businesses has to survive a reload, so it is a sentinel, not
+  // a missing key. Business ids are hex blobs; this value is not one of them.
+  const ALL_BUSINESSES = '__all__';
+  const CACHE_TTL_MS = 5 * 60 * 1000;
+
+  const listeners = new Map();
+
+  // ---------------------------------------------------------------------
+  // RAW ROWS AND ACCESSORS MUST NOT SHARE A NAME.
+  //
+  // This object is later merged with `Object.assign(state, { businesses, branches, … })`
+  // so that `SR.state.branches()` is the reader. That assignment puts the
+  // FUNCTION on the key. But `load()` then did `state.branches = data.branches`,
+  // which puts the ARRAY back on the same key — so from the moment a session
+  // loaded, `SR.state.branches` was an array and `SR.state.branches()` threw
+  // "is not a function".
+  //
+  // `app.js` calls it inside `paintIdentity()`, which `showShell()` runs BEFORE
+  // `buildNav()`. The throw therefore skipped the navigation build entirely: the
+  // shell rendered with an EMPTY SIDEBAR for every role, on every deployment,
+  // including the platform administrator who has no business to load. One
+  // overwritten key, and the whole app looked broken.
+  //
+  // The rows now live under `*Rows`, which no accessor borrows, and the
+  // accessors are the only public way to read them.
+  // ---------------------------------------------------------------------
+  const state = {
+    user: null,
+    scope: null,
+    businessRows: [],
+    branchRows: [],
+    vertical: null,
+    settings: {},
+    featureLabels: {},
+    activeBusinessId: null,
+    activeBranchId: null,
+    loadedAt: 0,
+    cart: null,          // the in-progress POS cart, restored on reload
+    lastReceipt: null,   // the sale just completed, for the receipt screen
+  };
+
+  function on(event, fn) {
+    if (!listeners.has(event)) listeners.set(event, new Set());
+    listeners.get(event).add(fn);
+    return () => listeners.get(event).delete(fn);
+  }
+  function emit(event, detail) {
+    const set = listeners.get(event);
+    if (!set) return;
+    for (const fn of set) { try { fn(detail); } catch (e) { /* keep going */ } }
+  }
+
+  function readLocal(key) {
+    try { return localStorage.getItem(key) || null; } catch (e) { return null; }
+  }
+  function writeLocal(key, value) {
+    try { if (value) localStorage.setItem(key, value); else localStorage.removeItem(key); } catch (e) { /* fine */ }
+  }
+
+  // -------------------------------------------------------------------
+  // role helpers
+  // -------------------------------------------------------------------
+  const ROLE_RANK = { STAFF: 1, MANAGER: 2, OWNER: 3, ADMIN: 4 };
+  function rank(role) { return ROLE_RANK[String(role || '').toUpperCase()] || 0; }
+  function atLeast(role) { return rank(state.user && state.user.role) >= rank(role); }
+  function isRole(role) { return String((state.user && state.user.role) || '').toUpperCase() === String(role).toUpperCase(); }
+  function isAdmin() { return isRole('ADMIN'); }
+  function isOwner() { return isRole('OWNER'); }
+  /**
+   * The proprietor owns every business. A co-owner is the same stored role
+   * with a business on the row. The server sends `proprietor`; the business
+   * object is the fallback for a session loaded before that flag existed.
+   */
+  function isProprietor() {
+    const me = state.user || {};
+    if (me.proprietor === true) return true;
+    if (me.coOwner === true) return false;
+    return String(me.role || '').toUpperCase() === 'OWNER' && !(me.business && me.business.id);
+  }
+  function canAppointCoOwner() {
+    return isAdmin() || isProprietor();
+  }
+  function canChangeDeployment() {
+    return isAdmin() || isProprietor();
+  }
+  function isManager() { return isRole('MANAGER'); }
+  function isStaff() { return isRole('STAFF'); }
+  /** A general manager has no branch pin: they cover every branch of a business. */
+  function isGeneralManager() { return isManager() && !(state.user && state.user.branch && state.user.branch.id); }
+  function canSeeAllBranches() { return Boolean(state.scope && state.scope.allBranches); }
+
+  /**
+   * A cashier or a branch manager is locked to the shop on the account.
+   * A general manager has no shop on the account: they cover every shop of
+   * their business. A co-owner has no shop on the account either: they cover
+   * the shops of the businesses they were given, not every shop on the deployment.
+   * An owner who can see every shop is not locked to a home shop.
+   */
+  function lockedToOneShop() {
+    // The pin is on the account. An offline till copies every business into
+    // its catalogue. That copy is not permission to leave the shop this
+    // person was given, and it must not paint Switch business.
+    if (canSeeAllBranches()) return false;
+    return Boolean(state.user && state.user.branch && state.user.branch.id);
+  }
+
+  /** Shops of the business in view, or every shop this account reaches. */
+  function shopsInView() {
+    return state.activeBusinessId ? branchesFor(state.activeBusinessId) : branches();
+  }
+
+  /** May this user act on a screen? `min` is a role name. */
+  function can(min) { return atLeast(min); }
+
+  /**
+   * May this user manage THAT user — reset their PIN, change their role, end their session?
+   *
+   * THE SERVER DECIDES (`canManageUser`, domain/roles.js) AND THIS MIRRORS IT. It exists so a
+   * button is not offered where the route would answer 403 — a screen that offers an action it
+   * cannot deliver teaches people the product is broken. The mirror is not the authority: every
+   * call is checked again server-side, and a disagreement shows up as a refusal through
+   * `ui.apiError`, which is the safe direction for the screen to be wrong in.
+   *
+   * Two deliberate differences from `atLeast`, both taken from the route: signing YOURSELF out
+   * is always allowed (it is not an authority question), and the deployment administrator
+   * cannot be managed by anyone but themselves.
+   */
+  function canManageUser(target) {
+    if (!target) return false;
+    const me = state.user || {};
+    const targetRole = String(target.role || '').toUpperCase();
+    const targetId = String(target.id != null ? target.id : target.user_id);
+    if (targetId !== 'undefined' && targetId === String(me.id)) return true; // your own session
+    if (targetRole === 'ADMIN') return false;
+    if (!atLeast('MANAGER')) return false;
+    // The proprietor edits a co-owner. Both are stored as OWNER, so rank
+    // alone would hide the button the route allows.
+    if (isProprietor() && targetRole === 'OWNER' && target.business_id) return true;
+    return rank(me.role) > rank(targetRole);
+  }
+
+  /**
+   * May this user CREATE somebody at that role?
+   *
+   * THE SERVER DECIDES (`canManageUser(actor, { role })` in `POST /api/users`) AND THIS MIRRORS
+   * IT. The create form offered all four roles to everybody, so an owner picking "Owner" — a
+   * perfectly ordinary thing for an owner to try — was refused with "You are a Owner and cannot
+   * create a Owner. Only somebody above that role can." after filling the whole form. A chooser
+   * should offer what it can deliver.
+   *
+   * The rule, read off the route: the deployment administrator may create anything; nobody
+   * creates an administrator but them; and otherwise only strictly higher ranks can be created.
+   */
+  function canCreateRole(role) {
+    const me = state.user || {};
+    const mine = String(me.role || '').toUpperCase();
+    const wanted = String(role || '').toUpperCase();
+    if (!wanted) return false;
+    if (mine === 'ADMIN') return true;
+    if (wanted === 'ADMIN') return false;
+    return rank(mine) > rank(wanted);
+  }
+
+  /**
+   * Does a person at this role need a branch?
+   *
+   * AN OWNER DOES NOT. An owner reaches every branch by role — `allBranches` is true for OWNER
+   * whether or not the row carries a branch_id — and a business is provisioned with its proprietor
+   * unpinned. Requiring a branch of an owner made the form say "add a branch" on a deployment that
+   * had none, and on one that had them it pinned a person whose scope does not come from a pin.
+   * A cashier is scoped by the branch they belong to. A manager is too, unless they
+   * are being appointed as a general manager — MANAGER with no branch, which reaches
+   * every branch of their business and not the whole deployment. The deployment
+   * administrator is not pinned either.
+   */
+  function roleNeedsBranch(role, opts) {
+    const r = String(role || '').toUpperCase();
+    if (r === 'ADMIN' || r === 'OWNER' || r === 'CO_OWNER') return false;
+    if (r === 'MANAGER' && opts && opts.generalManager) return false;
+    return true;
+  }
+
+  // -------------------------------------------------------------------
+  // feature flags
+  // -------------------------------------------------------------------
+  function feature(key) {
+    const raw = state.settings ? state.settings[key] : undefined;
+    if (raw === undefined || raw === null) return true;
+    return Boolean(Number(raw));
+  }
+
+  /**
+   * Does this business identify units by serial number?
+   *
+   * Off unless the owner has turned the switch on. `feature()` treats a missing
+   * setting as on, which is the right answer for a module that ships enabled and
+   * the wrong one here: a shop that has not chosen serials must not be asked for
+   * them at the counter, on a goods receipt, or on the slip.
+   */
+  function usesSerialNumbers() {
+    return Number(state.settings && state.settings.serial_tracking_enabled) === 1;
+  }
+  function featureLabel(key) { return state.featureLabels[key] || key; }
+
+  /**
+   * Is this module part of the business currently on screen?
+   *
+   * A group view has no single business, so a module shows only when every
+   * business the caller can reach uses it. Otherwise a hire book would sit
+   * in the navigation of a pharmacy, and the Greenbook would sit in a
+   * furniture shop.
+   */
+  function moduleOn(name) {
+    const rows = businesses().filter((b) => b && b.modules);
+    if (state.activeBusinessId) {
+      const focused = rows.find((b) => String(b.id) === String(state.activeBusinessId));
+      return Boolean(focused && focused.modules[name]);
+    }
+    if (!rows.length) return false;
+    return rows.every((b) => b.modules[name]);
+  }
+
+  // -------------------------------------------------------------------
+  // active business / branch
+  // -------------------------------------------------------------------
+  function idSet(list) {
+    const out = new Set();
+    for (const id of list || []) {
+      if (id != null && id !== '') out.add(String(id));
+    }
+    return out;
+  }
+
+  // The sync copy stores every business so the books can be completed.
+  // The shell may offer only the businesses this account reaches. A staff
+  // member of one branch must not see the rest just because the till is offline.
+  function reachableBusinesses() {
+    const rows = (state.businessRows || []).filter((row) => row && row.id != null);
+    const scope = state.scope || {};
+    if (scope.allBusinesses) return rows;
+    const user = state.user || {};
+    const ids = idSet(scope.businessIds);
+    if (user.business && user.business.id) ids.add(String(user.business.id));
+    if (scope.pinnedBusinessId) ids.add(String(scope.pinnedBusinessId));
+    const pin = user.branch && user.branch.id;
+    if (pin) {
+      const branch = (state.branchRows || []).find((row) => row && String(row.id) === String(pin));
+      if (branch && branch.business_id) ids.add(String(branch.business_id));
+    }
+    if (!ids.size) {
+      const role = String(user.role || '').toUpperCase();
+      if (role === 'OWNER' || role === 'ADMIN') return rows;
+      if (user.business && user.business.id) {
+        return [{ id: user.business.id, name: user.business.name || 'Business' }];
+      }
+      return [];
+    }
+    const filtered = rows.filter((row) => ids.has(String(row.id)));
+    if (filtered.length) return filtered;
+    if (user.business && user.business.id) {
+      return [{ id: user.business.id, name: user.business.name || 'Business' }];
+    }
+    return [];
+  }
+
+  function reachableBranches() {
+    const rows = (state.branchRows || []).filter((row) => row && row.id != null);
+    const scope = state.scope || {};
+    if (scope.allBranches) return rows;
+    const user = state.user || {};
+    const ids = idSet(scope.branchIds);
+    if (user.branch && user.branch.id) ids.add(String(user.branch.id));
+    if (scope.pinnedBranchId) ids.add(String(scope.pinnedBranchId));
+    if (ids.size) return rows.filter((row) => ids.has(String(row.id)));
+    const bizIds = new Set(reachableBusinesses().map((row) => String(row.id)));
+    if (!bizIds.size) return [];
+    return rows.filter((row) => bizIds.has(String(row.business_id)));
+  }
+
+  function businesses() { return reachableBusinesses(); }
+  function branches() { return reachableBranches(); }
+
+  function branchesFor(businessId) {
+    if (!businessId) return branches();
+    return branches().filter((b) => String(b.business_id) === String(businessId));
+  }
+
+  function activeBusiness() {
+    return businesses().find((b) => String(b.id) === String(state.activeBusinessId)) || businesses()[0] || null;
+  }
+  function activeBranch() {
+    return branches().find((b) => String(b.id) === String(state.activeBranchId)) || null;
+  }
+  function activeBranchName() {
+    const b = activeBranch();
+    if (b) {
+      const named = String(b.name || b.code || '').trim();
+      if (named) return named;
+    }
+    // No shop chosen. A dash is what the chip showed for a general manager or
+    // co-owner who reaches several shops: the control looked empty, and because
+    // it was also treated as pinned it would not open. Name the group they
+    // actually reach. All branches stays the owner's word for the whole deployment.
+    // All branches is the owner's place to stand, including when the business
+    // in view has only one shop. Naming that shop here would make the chip lie:
+    // the figures would still be the group, because no shop was chosen.
+    if (canSeeAllBranches()) return 'All branches';
+    const choices = shopsInView();
+    const namedChoice = (row) => String((row && (row.name || row.code)) || '').trim() || 'Shop';
+    if (choices.length === 1) return namedChoice(choices[0]);
+    if (choices.length > 1 || branches().length > 1) return 'All shops';
+    if (branches().length === 1) return namedChoice(branches()[0]);
+    return '—';
+  }
+  /**
+   * The active business's NAME, or a phrase that is still true when there is none.
+   *
+   * `activeBusiness()` returns null on a deployment that has no business yet — the
+   * state every fresh installation starts in, and the state an administrator is in
+   * for as long as it takes them to run the first provisioning. Five screens wrote
+   * `${SR.state.activeBusiness().name}` straight into their page subtitle, so on
+   * exactly those deployments they threw `Cannot read properties of null` and the
+   * screen showed "That failed." instead of rendering. The Subscription screen is
+   * in the administrator's own navigation, which is how it was noticed.
+   *
+   * A subtitle is not a place to make a decision about whether a page may exist:
+   * it must never be able to fail the page it introduces.
+   */
+  function activeBusinessName(fallback = 'No business yet') {
+    if (!state.activeBusinessId && businesses().length > 1) return 'All businesses';
+    const b = activeBusiness();
+    if (b && b.name) return b.name;
+    const settings = state.settings || {};
+    return settings.business_name || fallback;
+  }
+
+  function canSwitchBusiness() {
+    if (lockedToOneShop()) return false;
+    return businesses().length > 1;
+  }
+
+  /**
+   * The branch chip is a control when there is a shop to choose.
+   *
+   * Seeing every shop on the deployment is not the test. A general manager
+   * and a co-owner have `allBranches` false and still reach more than one shop.
+   * Treating that as a pin left the chip disabled, so a click did nothing and
+   * the label stayed a dash. A cashier or a branch manager is the pin. A
+   * business with one shop that is already selected does not pretend there is
+   * a second. An owner who can see every shop can still move, including back
+   * to All branches, after they have stood on one shop.
+   */
+  function canSwitchBranch() {
+    if (lockedToOneShop()) return false;
+    const choices = shopsInView();
+    if (!state.activeBranchId && (choices.length >= 1 || branches().length >= 1)) return true;
+    if (choices.length > 1) return true;
+    return canSeeAllBranches() && branches().length > 1;
+  }
+
+  /**
+   * Choose the branch every subsequent request will name.
+   *
+   * A user pinned to one branch has no choice to make, and is never shown one.
+   * A user with several branches must choose explicitly — the app does not guess,
+   * because guessing is how stock gets received into the wrong shop — but the
+   * choice is REMEMBERED per device so a counter till does not re-ask all day.
+   */
+  function alignBusinessToBranch(branchId, { persist = true, silent = false } = {}) {
+    if (!branchId) return false;
+    const branch = branches().find((b) => String(b.id) === String(branchId));
+    if (!branch || !branch.business_id) return false;
+    if (!businesses().some((b) => String(b.id) === String(branch.business_id))) return false;
+    if (String(state.activeBusinessId) === String(branch.business_id)) return false;
+    state.activeBusinessId = String(branch.business_id);
+    if (persist) writeLocal(ACTIVE_BUSINESS_KEY, state.activeBusinessId);
+    if (!silent) emit('business', { businessId: state.activeBusinessId, business: activeBusiness() });
+    return true;
+  }
+
+  function setBranch(branchId, { persist = true, silent = false } = {}) {
+    const id = branchId ? String(branchId) : null;
+    if (id && !branches().some((b) => String(b.id) === id)) {
+      // Never let a stale localStorage value or a typed URL put the app into a
+      // branch this user cannot see.
+      return { ok: false, reason: 'That branch is not one you have access to.' };
+    }
+    state.activeBranchId = id;
+    if (persist) writeLocal(ACTIVE_BRANCH_KEY, id);
+    // A shop belongs to one business. Picking it is also picking that business,
+    // so the two ids cannot disagree on the next request.
+    const moved = alignBusinessToBranch(id, { persist, silent });
+    if (!silent) emit('branch', { branchId: id, branch: activeBranch() });
+    return { ok: true, businessMoved: moved };
+  }
+
+  function setBusiness(businessId, { persist = true, silent = false, all = false } = {}) {
+    if (all) {
+      if (businesses().length < 2) {
+        return { ok: false, reason: 'There is only one business to work in.' };
+      }
+      if (lockedToOneShop()) {
+        return { ok: false, reason: 'You are pinned to one shop, so the books stay with that business.' };
+      }
+      state.activeBusinessId = null;
+      state.activeBranchId = null;
+      if (persist) {
+        writeLocal(ACTIVE_BUSINESS_KEY, ALL_BUSINESSES);
+        writeLocal(ACTIVE_BRANCH_KEY, null);
+      }
+      if (!silent) {
+        emit('business', { businessId: null, business: null, all: true });
+        emit('branch', { branchId: null, branch: null });
+      }
+      return { ok: true, all: true };
+    }
+    const id = businessId ? String(businessId) : null;
+    if (id && !businesses().some((b) => String(b.id) === id)) {
+      return { ok: false, reason: 'That business is not one you have access to.' };
+    }
+    if (lockedToOneShop()) {
+      const pinned = state.user && state.user.branch && state.user.branch.id;
+      const pinBranch = branches().find((b) => String(b.id) === String(pinned));
+      if (pinBranch && pinBranch.business_id && String(id) !== String(pinBranch.business_id)) {
+        return { ok: false, reason: 'You are pinned to one shop, so the books stay with that business.' };
+      }
+    }
+    state.activeBusinessId = id;
+    if (persist) writeLocal(ACTIVE_BUSINESS_KEY, id);
+    // The branch belongs to a business. Switching legal entity must not leave
+    // the app pointing at a shop of the old one. An owner who can see every
+    // shop is not guessed onto one — All branches is a place they can stand.
+    // Somebody who is not in that view, and who only reaches one shop of the
+    // new business, is put on that shop. Leaving it unset made the chip a dash
+    // again after the switch. Several shops are still not guessed.
+    const forBiz = branchesFor(id);
+    const stillValid = id && forBiz.some((b) => String(b.id) === String(state.activeBranchId));
+    let branchCleared = false;
+    if (!stillValid) {
+      const pinned = state.user && state.user.branch && state.user.branch.id;
+      const pinFits = lockedToOneShop() && pinned && forBiz.some((b) => String(b.id) === String(pinned));
+      let next = pinFits ? String(pinned) : null;
+      if (!next && !canSeeAllBranches() && forBiz.length === 1) next = String(forBiz[0].id);
+      branchCleared = Boolean(state.activeBranchId) && !next;
+      state.activeBranchId = next;
+      if (persist) writeLocal(ACTIVE_BRANCH_KEY, state.activeBranchId);
+      if (!silent) emit('branch', { branchId: state.activeBranchId, branch: activeBranch() });
+    }
+    if (!silent) emit('business', { businessId: id, business: activeBusiness() });
+    return { ok: true, branchCleared };
+  }
+
+  // -------------------------------------------------------------------
+  // load
+  // -------------------------------------------------------------------
+  /** Populate everything from `/api/auth/me`. Throws if the session is dead. */
+  async function load({ force = false } = {}) {
+    if (!force && state.user && Date.now() - state.loadedAt < CACHE_TTL_MS) return state;
+    const data = await SR.api.me();
+    state.user = data.user || null;
+    state.scope = data.scope || null;
+    state.businessRows = data.businesses || [];
+    state.branchRows = data.branches || [];
+    state.vertical = data.vertical || null;
+    state.settings = data.settings || {};
+    state.featureLabels = data.featureLabels || {};
+    state.loadedAt = Date.now();
+
+    // Mirror the reference data so the offline screens have names to show.
+    await SR.store.putMany('businesses', state.businessRows).catch(() => {});
+    await SR.store.putMany('branches', state.branchRows).catch(() => {});
+    await SR.store.putMany('client_settings', state.settings && state.settings.id ? [state.settings] : []).catch(() => {});
+    await SR.store.metaSet('me', {
+      user: state.user, scope: state.scope, settings: state.settings,
+      featureLabels: state.featureLabels, vertical: state.vertical, at: SR.util.nowIso(),
+    }).catch(() => {});
+
+    resolveActive();
+    emit('loaded', state);
+    return state;
+  }
+
+  /** Restore the signed-in shell from the mirror when the server is unreachable. */
+  async function loadFromMirror() {
+    const cached = await SR.store.metaGet('me');
+    if (!cached || !cached.user) return null;
+    state.user = cached.user;
+    state.scope = cached.scope;
+    state.settings = cached.settings || {};
+    state.featureLabels = cached.featureLabels || {};
+    state.vertical = cached.vertical || null;
+    state.businessRows = await SR.store.all('businesses').catch(() => []);
+    state.branchRows = await SR.store.all('branches').catch(() => []);
+    state.loadedAt = Date.now();
+    resolveActive();
+    emit('loaded', state);
+    return state;
+  }
+
+  function resolveActive() {
+    const pinned = state.user && state.user.branch && state.user.branch.id;
+    const rememberedBusiness = readLocal(ACTIVE_BUSINESS_KEY);
+    const rememberedBranch = readLocal(ACTIVE_BRANCH_KEY);
+    const bizIds = businesses().map((b) => String(b.id));
+
+    // All businesses is a choice, not a missing one. A remembered shop must not
+    // pull them back into that shop's business on the next load, or the group
+    // view can never survive a reload. A pin still wins: a pinned user has no
+    // group to stand in. An owner who can see every shop is not that pin.
+    if (rememberedBusiness === ALL_BUSINESSES && bizIds.length > 1 && !lockedToOneShop()) {
+      state.activeBusinessId = null;
+      state.activeBranchId = branches().length === 1 ? String(branches()[0].id) : null;
+      return;
+    }
+    const rememberedBiz = rememberedBusiness === ALL_BUSINESSES ? null : rememberedBusiness;
+
+    // Business: the remembered one if it is still reachable, else the only one,
+    // else the first, else nothing (a multi-entity owner picks).
+    if (rememberedBiz && bizIds.includes(String(rememberedBiz))) {
+      state.activeBusinessId = String(rememberedBiz);
+    } else if (state.user && state.user.business && bizIds.includes(String(state.user.business.id))) {
+      state.activeBusinessId = String(state.user.business.id);
+    } else if (bizIds.length === 1) {
+      state.activeBusinessId = bizIds[0];
+    } else if (state.vertical && state.vertical.profile_code) {
+      const match = businesses().find((b) => b.profile_code === state.vertical.profile_code);
+      state.activeBusinessId = match ? String(match.id) : (bizIds[0] || null);
+    } else {
+      state.activeBusinessId = bizIds[0] || null;
+    }
+
+    const forBiz = branchesFor(state.activeBusinessId);
+    const pinBranch = pinned ? branches().find((b) => String(b.id) === String(pinned)) : null;
+    const pinFits = Boolean(pinBranch && (!state.activeBusinessId || String(pinBranch.business_id) === String(state.activeBusinessId)));
+    const rememberedRow = rememberedBranch ? branches().find((b) => String(b.id) === String(rememberedBranch)) : null;
+    const rememberedFits = Boolean(rememberedRow && (!state.activeBusinessId || String(rememberedRow.business_id) === String(state.activeBusinessId)));
+    // A cashier is the person the pin is for. An owner who can see every shop
+    // is not locked to their home shop: choosing a pharmaceutical business
+    // must not be rewritten to the electronics shop on the next load, or the
+    // Greenbook and the controlled register never open.
+    const lockedToPin = Boolean(pinBranch && !canSeeAllBranches());
+
+    if (lockedToPin) {
+      state.activeBranchId = String(pinned);
+    } else if (rememberedFits) {
+      state.activeBranchId = String(rememberedBranch);
+    } else if (pinFits) {
+      state.activeBranchId = String(pinned);
+    } else if (canSeeAllBranches() && branches().length > 1) {
+      state.activeBranchId = null;
+    } else if (forBiz.length === 1) {
+      state.activeBranchId = String(forBiz[0].id);
+    } else if (branches().length === 1) {
+      state.activeBranchId = String(branches()[0].id);
+    } else {
+      // Several shops, and this person is not standing on the whole deployment.
+      // Do not guess which shop. The chip says All shops and the picker lists
+      // the shops they reach — not every shop on the deployment.
+      state.activeBranchId = null;
+    }
+
+    // Keep the business in step with the branch: the branch knows its owner.
+    const branch = branches().find((b) => String(b.id) === String(state.activeBranchId));
+    if (branch && branch.business_id && String(branch.business_id) !== String(state.activeBusinessId)
+        && bizIds.includes(String(branch.business_id))) {
+      state.activeBusinessId = String(branch.business_id);
+    }
+  }
+
+  /** Every list request needs a branch. Callers should use this rather than
+   *  inventing a query string, so the "which shop?" decision is made once. */
+  function query(extra = {}) {
+    const q = Object.assign({}, extra);
+    if (state.activeBusinessId) q.business_id = state.activeBusinessId;
+    // A shop of another business must not ride along. The server used to treat
+    // that shop as the business, and a dispensary was told it was not one.
+    const branch = activeBranch();
+    if (branch && state.activeBranchId && (!state.activeBusinessId || String(branch.business_id) === String(state.activeBusinessId))) {
+      q.branch_id = state.activeBranchId;
+    }
+    return q;
+  }
+
+  function clear() {
+    state.user = null; state.scope = null; state.businessRows = []; state.branchRows = [];
+    state.vertical = null; state.settings = {}; state.featureLabels = {};
+    state.activeBranchId = null; state.activeBusinessId = null; state.loadedAt = 0;
+    state.cart = null;
+    emit('cleared', null);
+  }
+
+  // -------------------------------------------------------------------
+  // POS cart — persisted, because a flat battery must not lose a cart
+  // -------------------------------------------------------------------
+  function saveCart(cart) {
+    state.cart = cart;
+    try { localStorage.setItem('sr.cart', JSON.stringify(cart)); } catch (e) { /* fine */ }
+  }
+  function loadCart() {
+    if (state.cart) return state.cart;
+    try {
+      const raw = localStorage.getItem('sr.cart');
+      state.cart = raw ? JSON.parse(raw) : null;
+    } catch (e) { state.cart = null; }
+    return state.cart;
+  }
+  function clearCart() {
+    state.cart = null;
+    try { localStorage.removeItem('sr.cart'); } catch (e) { /* fine */ }
+  }
+
+  SR.state = Object.assign(state, {
+    on, emit, load, loadFromMirror, clear,
+    rank, atLeast, isRole, isAdmin, isOwner, isProprietor, canAppointCoOwner, canChangeDeployment,
+    isManager, isStaff, isGeneralManager, canManageUser,
+    canCreateRole, roleNeedsBranch,
+    canSeeAllBranches, lockedToOneShop, can, usesSerialNumbers,
+    feature, featureLabel, moduleOn,
+    businesses, branches, branchesFor, activeBusiness, activeBranch, activeBranchName, activeBusinessName,
+    canSwitchBusiness, canSwitchBranch,
+    setBranch, setBusiness, query,
+    saveCart, loadCart, clearCart,
+  });
+}(window));
+/* StockRidge — keep the saved till when the line returns. */
+(function (global) {
+  'use strict';
+  const SR = global.SR = global.SR || {};
+
+  function decide(row) {
+    const reason = String((row && row.reason) || '');
+    const message = String((row && row.message) || '');
+    const hasLocal = Boolean(row && row.hasLocalSession);
+    const foreign = reason === 'TOKEN_BAD_SIGNATURE' || /invalid token signature|TOKEN_BAD_SIGNATURE/i.test(message);
+    if (foreign) return { signOut: false, keep: true, why: 'The other shop host does not share this session. This till stays open.' };
+    // The shop named this code. A dropped header is NO_TOKEN, not this.
+    // Saving, a page change, or sales still in the outbox must not keep a
+    // session the other device has already replaced. The outbox stays.
+    if (row && row.shopConfirmed && (reason === 'SESSION_SUPERSEDED' || reason === 'SESSION_REVOKED' || reason === 'USER_GONE')) {
+      return { signOut: true, keep: false, why: reason === 'SESSION_SUPERSEDED' ? 'This account is signed in on another device.' : 'This session was ended.' };
+    }
+    if (row && row.navigated && hasLocal) return { signOut: false, keep: true, why: 'A page change is not a sign-out. This till stays open.' };
+    if (row && row.reconnecting && hasLocal) return { signOut: false, keep: true, why: 'The line just returned. This till stays signed in and will catch up.' };
+    if (row && row.uploading && hasLocal) return { signOut: false, keep: true, why: 'Queued sales are still uploading. This till stays signed in.' };
+    if (row && row.pendingUpload && hasLocal) return { signOut: false, keep: true, why: 'Sales saved on this till have not uploaded yet. Sending them is not a sign-out.' };
+    if (hasLocal && row && !row.shopConfirmed) return { signOut: false, keep: true, why: 'The shop has not given a stable answer. The saved till stays open.' };
+    const confirmed = Boolean(row && row.confirmedTwice && row.shopConfirmed && !row.reconnecting && !row.uploading);
+    if (confirmed && (reason === 'SESSION_SUPERSEDED' || reason === 'SESSION_REVOKED' || reason === 'USER_GONE')) {
+      return { signOut: true, keep: false, why: reason === 'SESSION_SUPERSEDED' ? 'This account is signed in on another device.' : 'This session was ended.' };
+    }
+    if (hasLocal) return { signOut: false, keep: true, needsSignInToUpload: reason === 'TOKEN_EXPIRED' || reason === 'BAD_TOKEN', why: 'The saved till stays open. A shop refusal when the line returns is not a sign-out.' };
+    if (row && row.shopConfirmed && (reason === 'SESSION_REVOKED' || reason === 'USER_GONE' || reason === 'TOKEN_EXPIRED' || reason === 'BAD_TOKEN')) {
+      return { signOut: true, keep: false, why: 'There is no saved till to keep.' };
+    }
+    return { signOut: false, keep: false, why: 'Not a confirmed end of this session.' };
+  }
+
+  SR.sessionHold = { decide };
+}(window));
+'use strict';

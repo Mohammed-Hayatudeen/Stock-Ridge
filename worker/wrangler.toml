@@ -1,0 +1,40 @@
+# StockRidge's only cloud runtime: one Worker, shared routes, Turso and the PWA.
+name = "beta"
+workers_dev = true
+main = "src/index.mjs"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "../public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/diagnose"]
+
+[vars]
+ENVIRONMENT = "production"
+DB_NAME = "stockridge"
+# Public database location only. TURSO_AUTH_TOKEN and JWT_SECRET are Worker secrets.
+TURSO_DATABASE_URL = "https://stock2-mohammed-hayatudeen.aws-eu-central-1.turso.io"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[triggers]
+crons = ["15 1 * * *"]
+
+[env.staging]
+name = "stockridge-staging"
+[env.staging.vars]
+ENVIRONMENT = "staging"
+DB_NAME = "stockridge-staging"
+# Set a separate staging Turso URL before deploying staging.
+TURSO_DATABASE_URL = ""
+
+[env.sample]
+name = "sample"
+[env.sample.vars]
+ENVIRONMENT = "sample"
+DB_NAME = "stockridge-sample"
+TURSO_DATABASE_URL = "https://stock2-mohammed-hayatudeen.aws-eu-central-1.turso.io"

@@ -1,0 +1,967 @@
+'use strict';
+// =====================================================================
+// public/js/views/sales.js — THE SALES BOOK, AND ONE SALE IN FULL
+// =====================================================================
+// Two screens in one file: the list (a filterable book of every receipt) and the
+// detail (everything that happened on one sale, and the actions available on it).
+//
+// The detail screen is where the interesting decisions live:
+//   * VOID is offered only where the server would allow it, and always asks for
+//     a real reason — a void with no reason is the signature of a theft.
+//   * SETTLE is offered on anything with a balance, and is explicitly NOT a new
+//     sale: it posts cash against a receivable.
+//   * The journal entry is shown, because "did this reach the books?" is the
+//     question an owner actually asks, and the answer should not require a
+//     second screen.
+// =====================================================================
+(function (global) {
+  const SR = global.SR;
+  const ui = SR.ui;
+  const U = SR.util;
+
+  const PAGE_SIZE = 50;
+
+  async function render(ctx) {
+    if (ctx.route && ctx.route.path === '/sales/issues') return renderIssues(ctx);
+    if (ctx.params.id === 'issues') return renderIssues(ctx);
+    if (ctx.params.id) return renderDetail(ctx);
+    ctx.setTitle('Sales');
+    const state = { page: 0, pageSize: PAGE_SIZE, q: '', from: ctx.query.from || U.todayWat(-30), to: ctx.query.to || U.todayWat(), type: '', status: '', method: '', category: '', sort: 'date' };
+
+    const wrap = ui.h('div', { class: 'stack' });
+    const head = ui.h('div', { class: 'page-head' },
+      ui.h('div', {},
+        ui.h('h1', {}, 'Sales'),
+        ui.h('p', { class: 'sub' }, 'Every receipt rung through the branches you can see.')),
+      ui.h('div', { class: 'actions' },
+        ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => SR.app.navigate('/pos') }, 'New sale'),
+        SR.app.canScreen && SR.app.canScreen('flagged') ? ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/sales/issues') }, 'Flagged sales') : null,
+        SR.exporter.buttons((format) => SR.exporter.list({
+          format,
+          title: 'Sales',
+          filename: 'sales', path: '/api/sales', query: filterQuery(), mirrorTable: null,
+          columns: [
+            { key: 'receipt_no', label: 'Receipt' }, { key: 'sold_at', label: 'Date (WAT)' },
+            { key: 'branch_name', label: 'Branch' }, { key: 'cashier_name', label: 'Cashier' },
+            { key: 'customer_name', label: 'Customer' }, { key: 'sale_type', label: 'Type' },
+            { key: 'payment_method', label: 'Payment' }, { key: 'total', label: 'Total' },
+            { key: 'amount_paid', label: 'Paid' }, { key: 'balance_due', label: 'Balance' },
+            { key: 'status', label: 'Status' },
+          ],
+        })),
+        SR.app.canScreen && SR.app.canScreen('reports') ? ui.h('button', { class: 'btn btn-sm', onClick: () => SR.exporter.reportDialog() }, 'Server reports') : null));
+    wrap.appendChild(head);
+
+    // ---- filters
+    const filters = ui.h('div', { class: 'card' });
+    const fbody = ui.h('div', { class: 'card-body row' });
+    const qInput = ui.h('input', { type: 'search', placeholder: 'Receipt, customer or cashier…', style: { minWidth: '200px' } });
+    qInput.value = state.q;
+    fbody.appendChild(ui.h('div', { class: 'grow' }, qInput));
+    fbody.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'From'), ui.h('input', { type: 'date', value: state.from, onchange: (e) => { state.from = e.target.value; state.page = 0; load(); } })));
+    fbody.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'To'), ui.h('input', { type: 'date', value: state.to, onchange: (e) => { state.to = e.target.value; state.page = 0; load(); } })));
+    const typeSel = ui.h('select', { onchange: (e) => { state.type = e.target.value; state.page = 0; load(); } });
+    typeSel.appendChild(ui.h('option', { value: '' }, 'All types'));
+    for (const t of ['RETAIL', 'WHOLESALE', 'CREDIT', 'INSTALMENT', 'LAYAWAY', 'EXCHANGE']) typeSel.appendChild(ui.h('option', { value: t }, U.humanise(t)));
+    fbody.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Type'), typeSel));
+    const statusSel = ui.h('select', { onchange: (e) => { state.status = e.target.value; state.page = 0; load(); } });
+    for (const [v, l] of [['', 'Any status'], ['COMPLETED', 'Completed'], ['VOIDED', 'Voided'], ['PENDING_DELIVERY', 'Pending delivery']]) statusSel.appendChild(ui.h('option', { value: v }, l));
+    fbody.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Status'), statusSel));
+    const groupSel = ui.h('select', { onchange: (e) => { state.category = e.target.value; state.page = 0; load(); } });
+    groupSel.appendChild(ui.h('option', { value: '' }, 'All categories'));
+    fbody.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Category'), groupSel));
+    fillSaleCategories(groupSel);
+    filters.appendChild(fbody);
+    wrap.appendChild(filters);
+
+    const summaryHost = ui.h('div', {});
+    wrap.appendChild(summaryHost);
+    const listHost = ui.h('div', {});
+    wrap.appendChild(listHost);
+
+    qInput.addEventListener('input', U.debounce(() => { state.q = qInput.value; state.page = 0; load(); }, 320));
+
+    async function fillSaleCategories(select) {
+      let rows = [];
+      try {
+        const data = await SR.api.get('/api/categories', { query: SR.state.query() });
+        rows = data.data || [];
+      } catch (err) {
+        rows = await SR.store.all('product_categories', {
+          where: (row) => !Number(row.is_deleted) && !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()),
+        }).catch(() => []);
+      }
+      rows = (rows || []).filter((row) => !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()))
+        .slice()
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+      const current = select.value;
+      select.replaceChildren(ui.h('option', { value: '' }, 'All categories'));
+      for (const row of rows) select.appendChild(ui.h('option', { value: String(row.id) }, row.name));
+      if ([...select.options].some((opt) => opt.value === current)) select.value = current;
+    }
+
+    function filterQuery() {
+      return Object.assign(SR.state.query({
+        q: state.q || undefined,
+        from: state.from, to: state.to,
+        sale_type: state.type || undefined,
+        status: state.status || undefined,
+        category_id: state.category || undefined,
+        limit: state.pageSize, offset: state.page * state.pageSize,
+      }));
+    }
+
+    async function load() {
+      listHost.replaceChildren(ui.skeleton(6));
+      summaryHost.replaceChildren();
+      let data = null; let offline = false;
+      try {
+        data = await SR.api.get('/api/sales', { query: filterQuery() });
+      } catch (err) {
+        if (!err.isOffline) { listHost.replaceChildren(ui.errorBlock(err, { retry: { label: 'Try again', run: load } })); return; }
+        offline = true;
+        data = await fromMirror();
+      }
+      const rows = data.data || data.rows || [];
+      const paging = data.paging || {};
+      if (data.summary) {
+        summaryHost.appendChild(ui.h('div', { class: 'grid grid-4' },
+          ui.kpi({ label: 'Receipts', value: String(data.summary.count || rows.length), small: true }),
+          ui.kpi({ label: 'Revenue', value: U.money(data.summary.revenue || data.summary.gross), tone: 'good', small: true }),
+          ui.kpi({ label: 'Collected', value: U.money(data.summary.collected || data.summary.paid), small: true }),
+          ui.kpi({ label: 'Outstanding', value: U.money(data.summary.outstanding || data.summary.balance), tone: Number(data.summary.outstanding) > 0 ? 'warn' : null, small: true })));
+        const cats = data.summary.categories || [];
+        if (cats.length) {
+          summaryHost.appendChild(ui.h('div', { class: 'btn-row', style: { marginTop: '8px' } },
+            ...cats.map((c) => ui.h('span', { class: 'badge badge-mute' }, `${c.label} ${U.money(c.amount)}`))));
+        }
+      }
+      const columns = [
+        { key: 'receipt_no', label: 'Receipt', render: (r) => ui.h('span', { class: 'mono' }, r.receipt_no || '—') },
+        { key: 'sold_at', label: 'Date (WAT)', render: (r) => U.soldAt(r.sold_at) },
+        { key: 'branch_name', label: 'Branch' },
+        { key: 'customer_name', label: 'Customer', className: 'wrap' },
+        { key: 'sale_type', label: 'Type', render: (r) => ui.badge(r.sale_type, r.sale_type === 'RETAIL' ? 'badge-mute' : 'badge-info') },
+        { key: 'settlement', label: 'Paper', render: (r) => SR.print.documentOf(r).title },
+        { key: 'cashier_name', label: 'Cashier' },
+        { key: 'item_count', label: 'Items', align: 'right' },
+        { key: 'total', label: 'Total', align: 'right', render: (r) => U.money(r.total) },
+        { key: 'balance_due', label: 'Balance', align: 'right', render: (r) => (Number(r.balance_due) > 0 ? ui.h('strong', { style: { color: 'var(--amber-700)' } }, U.money(r.balance_due)) : '—') },
+        { key: 'status', label: '', render: (r) => ui.statusBadge(r.status) },
+      ];
+      const table = ui.renderTable({
+        exportable: false,
+        columns,
+        rows,
+        onRowClick: (r) => SR.app.navigate(`/sales/${r.id}`),
+        emptyTitle: 'No sales in this range',
+        emptyMessage: 'Widen the dates, or clear the filters. Sales rung through the counter appear here the moment they are recorded.',
+        emptyAction: { label: 'Go to the counter', run: () => SR.app.navigate('/pos') },
+      });
+      const total = paging.total != null ? paging.total : rows.length;
+      const perPage = paging.limit || state.pageSize;
+      const pagerBar = ui.pager({
+        page: state.page, pageSize: perPage, total,
+        onPage: (p) => { state.page = p; load(); },
+        onSize: (n) => { state.pageSize = n; state.page = 0; load(); },
+      });
+      listHost.replaceChildren();
+      if (offline) listHost.appendChild(ui.h('div', { class: 'alert alert-warn' }, 'Offline — showing the sales this device recorded and the ones it last synced.'));
+      listHost.appendChild(ui.dataCard({ title: 'Receipts', table, pager: pagerBar }));
+    }
+
+    async function fromMirror() {
+      const outbox = await SR.store.outboxAll();
+      const queued = outbox.filter((o) => o.type === 'SALE' && ['PENDING', 'RETRY'].includes(o.status))
+        .map((o) => {
+          const p = o.payload || {};
+          return {
+            id: o.client_id, receipt_no: `(queued) ${String(o.client_id).slice(-6)}`,
+            sold_at: o.occurred_at, sale_type: p.sale_type || 'RETAIL',
+            customer_name: p.customer_name || 'Walk-in', total: p._expectedTotal || 0,
+            balance_due: 0, status: 'QUEUED', item_count: (p.lines || []).length,
+            cashier_name: (SR.state.user || {}).fullName,
+          };
+        });
+      const stored = await SR.store.all('sales').catch(() => []);
+      const seen = new Set(queued.map((row) => String(row.id)));
+      const copied = (stored || []).filter((row) => row && row.id != null && !Number(row.is_deleted) && !seen.has(String(row.id)));
+      let rows = queued.concat(copied);
+      if (state.category) {
+        const items = await SR.store.all('sale_items').catch(() => []);
+        const ids = new Set((items || []).filter((item) => !Number(item.is_deleted) && String(item.category_id) === String(state.category)).map((item) => String(item.sale_id)));
+        rows = rows.filter((row) => ids.has(String(row.id)));
+      }
+      rows.sort((a, b) => String(b.sold_at || '').localeCompare(String(a.sold_at || '')));
+      return { data: rows, paging: { total: rows.length, limit: rows.length, offset: 0 } };
+    }
+
+    function fromMirrorSales() { return fromMirror(); }
+    void fromMirrorSales;
+
+    await load();
+    return wrap;
+  }
+
+  // -------------------------------------------------------------------
+  // ONE SALE
+  // -------------------------------------------------------------------
+  async function renderDetail(ctx) {
+    ctx.setTitle('Sale');
+    const wrap = ui.h('div', { class: 'stack' });
+    const host = ui.h('div', { class: 'stack' });
+    wrap.appendChild(host);
+    await load();
+
+    async function load() {
+      host.replaceChildren(ui.skeleton(7));
+      let data;
+      try {
+        data = await SR.api.get(`/api/sales/${encodeURIComponent(ctx.params.id)}`);
+      } catch (err) {
+        if (err.status === 404 || err.isOffline) {
+          const queued = (await SR.store.outboxAll()).find((o) => o.client_id === ctx.params.id);
+          if (queued) { host.replaceChildren(queuedCard(queued)); return; }
+          const sale = await SR.store.get('sales', ctx.params.id).catch(() => null);
+          if (sale) {
+            const items = await SR.store.all('sale_items', { where: (row) => String(row.sale_id) === String(sale.id) && !Number(row.is_deleted) }).catch(() => []);
+            const payments = await SR.store.all('sale_payments', { where: (row) => String(row.sale_id) === String(sale.id) && !Number(row.is_deleted) }).catch(() => []);
+            data = { sale, items, payments, changeOwed: [], journal: [], serials: [], prescriptions: [], controlledRegister: [] };
+          }
+        }
+        if (!data) {
+          host.replaceChildren(ui.errorBlock(err, { retry: { label: 'Reload', run: load } }));
+          return;
+        }
+      }
+      const sale = data.sale || data;
+      const items = data.items || sale.items || [];
+      const payments = data.payments || sale.payments || [];
+      const claims = data.changeOwed || [];
+      const openClaim = claims.find((c) => c.status === 'OUTSTANDING' && c.claim_code) || claims.find((c) => c.claim_code);
+      if (openClaim) {
+        sale.claim_code = sale.claim_code || openClaim.claim_code;
+        sale.change_owed = sale.change_owed || openClaim.amount;
+        sale.claim_expires_at = sale.claim_expires_at || openClaim.expires_at;
+      }
+      const journal = data.journal || [];
+      const serials = data.serials || [];
+      const prescriptions = data.prescriptions || [];
+      const controlledRegister = data.controlledRegister || [];
+
+      const head = ui.h('div', { class: 'page-head' },
+        ui.h('div', {},
+          ui.h('h1', {}, `Receipt ${sale.receipt_no || '—'}`),
+          ui.h('p', { class: 'sub' }, `${U.soldAt(sale.sold_at)} · ${sale.branch_name || SR.state.activeBranchName()} · ${sale.cashier_name || '—'}`)),
+        ui.h('div', { class: 'actions' },
+          ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/sales') }, 'Back to sales'),
+          ui.h('button', { class: 'btn btn-sm', onClick: () => SR.print.previewSale(Object.assign({}, sale, { items, payments, serials }), { brand: (SR.state.settings || {}).business_name || 'StockRidge', footer: (SR.state.settings || {}).receipt_footer_text || '', title: `Receipt ${sale.receipt_no}` }) }, 'Print'),
+          ui.h('button', { class: 'btn btn-sm', onClick: () => openReturn(sale, items) }, 'Return'),
+          (sale.status !== 'VOIDED' && canVoidThis(sale)) ? ui.h('button', { class: 'btn btn-sm btn-danger', onClick: () => openVoid(sale) }, 'Void') : null,
+          Number(sale.balance_due) > 0.01 && sale.status !== 'VOIDED' ? ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openSettle(sale) }, 'Take payment') : null,
+          repaintButton(sale, items, payments, serials)));
+      const saleNodes = [];
+      const recordNodes = [];
+      host.replaceChildren();
+
+      if (sale.status === 'VOIDED') {
+        saleNodes.push(ui.h('div', { class: 'alert alert-danger' },
+          ui.h('strong', {}, 'This sale was voided. '),
+          `${U.watClock(sale.voided_at)} — ${sale.void_reason || 'no reason recorded'}. The stock was returned and the ledger reversed; nothing was deleted.`));
+      }
+      if (Number(sale.balance_due) > 0.01 && sale.status !== 'VOIDED') {
+        saleNodes.push(ui.h('div', { class: 'alert alert-warn' },
+          `${U.money(sale.balance_due)} is still owed on this receipt. Take payment is in the bar above — that is the only place this receipt is settled.`));
+      }
+      saleNodes.push(saleIssuesCard(sale));
+
+      const totals = ui.h('div', { class: 'grid grid-5' },
+        ui.kpi({ label: 'Total', value: U.money(sale.total), small: true }),
+        ui.kpi({ label: 'Paid', value: U.money(sale.amount_paid), small: true, tone: 'good' }),
+        ui.kpi({ label: 'Balance', value: U.money(sale.balance_due), small: true, tone: Number(sale.balance_due) > 0 ? 'warn' : null }),
+        ui.kpi({ label: 'VAT included', value: U.money(sale.vat_amount), small: true }),
+        ui.kpi({ label: 'Status', value: U.humanise(sale.status), small: true }));
+      saleNodes.push(totals);
+      if (prescriptions.length) {
+        recordNodes.push(ui.dataCard({
+          title: 'Prescription',
+          table: ui.renderTable({
+            columns: [
+              { key: 'prescriber_name', label: 'Prescriber' },
+              { key: 'patient_name', label: 'Patient' },
+              { key: 'dosage_notes', label: 'Notes' },
+            ],
+            rows: prescriptions,
+          }),
+        }));
+      }
+      if (controlledRegister.length) {
+        recordNodes.push(ui.dataCard({
+          title: 'Controlled register',
+          table: ui.renderTable({
+            columns: [
+              { key: 'entry_type', label: 'Entry' },
+              { key: 'buyer_name', label: 'Buyer' },
+              { key: 'buyer_phone', label: 'Phone' },
+              { key: 'quantity_dispensed', label: 'Qty', align: 'right' },
+            ],
+            rows: controlledRegister,
+          }),
+        }));
+      }
+
+      const cols = ui.h('div', { class: 'grid grid-2' });
+
+      cols.appendChild(ui.dataCard({
+        title: 'Items',
+        table: ui.renderTable({
+          columns: [
+            { key: 'product_name', label: 'Item', className: 'wrap', render: (r) => {
+              const sns = serials.filter((sn) => String(sn.sale_item_id) === String(r.id)).map((sn) => sn.serial_no).filter(Boolean);
+              const listed = sns.length ? sns : (r.serial_no ? [r.serial_no] : []);
+              return ui.h('div', {},
+                ui.h('div', {}, r.product_name || r.name || 'Item'),
+                listed.length ? ui.h('div', { class: 'hint mono' }, listed.map((sn) => `S/N ${sn}`).join(' · ')) : null);
+            } },
+            { key: 'quantity', label: 'Qty', align: 'right', render: (r) => `${U.qty(r.quantity)} ${r.unit_code || ''}` },
+            { key: 'unit_price', label: 'Price', align: 'right', render: (r) => U.money(r.unit_price) },
+            { key: 'line_total', label: 'Total', align: 'right', render: (r) => U.money(r.line_total) },
+          ],
+          rows: items,
+        }),
+      }));
+
+      const side = ui.h('div', { class: 'stack' });
+      side.appendChild(ui.dataCard({
+        title: 'Payments',
+        table: ui.renderTable({
+          columns: [
+            { key: 'method', label: 'Method', render: (r) => U.humanise(r.method) },
+            { key: 'reference', label: 'Reference', render: (r) => r.reference || '—' },
+            { key: 'amount', label: 'Amount', align: 'right', render: (r) => U.money(r.amount) },
+          ],
+          rows: payments,
+          emptyMessage: 'No payment was recorded against this receipt.',
+        }),
+      }));
+      side.appendChild(ui.dataCard({
+        title: 'What this sale did',
+        table: ui.kv([
+          ['Branch', sale.branch_name || '—'],
+          ['Cashier', sale.cashier_name || '—'],
+          ['Customer', sale.customer_name || 'Walk-in'],
+          ['Customer phone', sale.customer_phone || null],
+          ['Sale type', U.humanise(sale.sale_type)],
+          ['Paper', SR.print.documentOf(sale).title],
+          ['Terms', SR.print.documentOf(sale).line],
+          ['Payment method', U.humanise(sale.payment_method || '—')],
+          ['Subtotal', U.money(sale.subtotal)],
+          ['Line discounts', U.money(sale.discount_amount)],
+          ['Order discount', Number(sale.order_discount_amount) ? U.money(sale.order_discount_amount) : null],
+          ['Delivery fee', Number(sale.delivery_fee) ? U.money(sale.delivery_fee) : null],
+          ['Change given', Number(sale.change_given) ? U.money(sale.change_given) : null],
+          ['Change owed', Number(sale.change_owed) ? U.money(sale.change_owed) : null],
+          ['Till', sale.till_session_id ? sale.till_session_id.slice(0, 8) : null],
+          ['Notes', sale.notes || null],
+        ]),
+      }));
+      cols.appendChild(side);
+      saleNodes.push(cols);
+
+      if (serials.length) {
+        recordNodes.push(ui.dataCard({
+          title: 'Serial numbers on this sale',
+          table: ui.renderTable({
+            columns: [
+              { key: 'serial_no', label: 'Serial' },
+              { key: 'product_name', label: 'Product' },
+              { key: 'warranty_start', label: 'Warranty from', render: (r) => U.soldDate(r.warranty_starts_at || sale.sold_at) },
+              { key: 'warranty_end', label: 'Warranty to', render: (r) => (r.warranty_ends_at ? U.date(r.warranty_ends_at) : '—') },
+            ],
+            rows: serials,
+          }),
+        }));
+      }
+
+      if (journal.length) {
+        const debit = journal.reduce((a, l) => a + Number(l.debit || 0), 0);
+        const credit = journal.reduce((a, l) => a + Number(l.credit || 0), 0);
+        recordNodes.push(ui.dataCard({
+          title: 'Posted to the books',
+          toolbar: ui.h('span', { class: `badge ${Math.abs(debit - credit) < 0.01 ? 'badge-good' : 'badge-bad'}` },
+            Math.abs(debit - credit) < 0.01 ? 'balanced' : `out by ${U.money(Math.abs(debit - credit))}`),
+          table: ui.renderTable({
+            columns: [
+              { key: 'account_code', label: 'Code', render: (r) => ui.h('span', { class: 'mono' }, r.account_code) },
+              { key: 'account_name', label: 'Account', className: 'wrap' },
+              { key: 'debit', label: 'Debit', align: 'right', render: (r) => (Number(r.debit) ? U.money(r.debit) : '—') },
+              { key: 'credit', label: 'Credit', align: 'right', render: (r) => (Number(r.credit) ? U.money(r.credit) : '—') },
+            ],
+            rows: journal,
+            foot: ['', 'Totals', U.money(debit), U.money(credit)],
+          }),
+        }));
+      }
+
+      // ---- actions
+      const canVoid = sale.status !== 'VOIDED' && canVoidThis(sale);
+      const actions = ui.h('div', { class: 'card' });
+      actions.appendChild(ui.h('div', { class: 'card-head' }, ui.h('h2', {}, 'Actions')));
+      const abody = ui.h('div', { class: 'card-body' });
+      abody.appendChild(ui.h('div', { class: 'btn-row' },
+        ui.h('button', { class: 'btn', onClick: () => SR.print.previewSale(Object.assign({}, sale, { items, payments, serials }), { brand: (SR.state.settings || {}).business_name || 'StockRidge', footer: (SR.state.settings || {}).receipt_footer_text || '' }) }, 'Print the paper'),
+        ui.h('button', {
+          class: 'btn',
+          onClick: () => openReturn(sale, items),
+        }, 'Start a return'),
+        canVoid ? ui.h('button', { class: 'btn btn-danger', onClick: () => openVoid(sale) }, 'Void this sale') : null,
+        Number(sale.balance_due) > 0.01 && sale.status !== 'VOIDED' ? ui.h('button', { class: 'btn btn-primary', onClick: () => openSettle(sale) }, 'Take payment') : null));
+      if (!canVoid && sale.status !== 'VOIDED') {
+        abody.appendChild(ui.h('div', { class: 'hint' },
+          'You cannot void this sale. A void is allowed for a manager at any time, and for staff only on their own sale inside the window the owner has set.'));
+      }
+      actions.appendChild(abody);
+      if (!recordNodes.length) {
+        recordNodes.push(ui.h('div', { class: 'card' }, ui.h('div', { class: 'card-body' },
+          ui.h('h2', {}, 'Records'),
+          ui.h('p', { class: 'sub' }, 'No prescription, controlled-substance entry, serial number or ledger posting is attached to this receipt.'))));
+      }
+      host.replaceChildren(ui.sectionTabs({
+        head,
+        remember: 'sr.saleTab',
+        sections: [
+          { id: 'sale', label: 'Sale', nodes: saleNodes },
+          { id: 'records', label: 'Records', nodes: recordNodes },
+          { id: 'actions', label: 'Actions', nodes: [actions] },
+        ],
+      }));
+
+      void payments;
+    }
+
+    function canVoidThis(sale) {
+      if (SR.state.atLeast('MANAGER')) return true;
+      const mine = String(sale.salesperson_id || '') === String((SR.state.user || {}).id);
+      const window = Number((SR.state.settings || {}).staff_void_window_minutes || 0);
+      if (!mine || !window) return false;
+      const mins = minutesSince(sale.sold_at);
+      return mins != null && mins >= 0 && mins <= window;
+    }
+
+    function minutesSince(watStamp) {
+      const d = U.parseStamp(watStamp, { zone: 'wat' });
+      return d ? Math.floor((Date.now() - d.getTime()) / 60000) : null;
+    }
+
+    function openVoid(sale) {
+      const wrapEl = ui.h('div', {});
+      wrapEl.appendChild(ui.h('p', {}, `Voiding receipt ${sale.receipt_no} for ${U.money(sale.total)}. The stock goes back onto the shelf at the cost it was bought at, the ledger is reversed by a compensating entry, and the reason is recorded against your name.`));
+      const reason = ui.h('textarea', { rows: 3, placeholder: 'What went wrong? e.g. "Wrong item scanned — customer bought the 1.5HP, not the 1HP."' });
+      wrapEl.appendChild(ui.h('label', { class: 'ctl' }, 'Reason (at least 4 characters)'));
+      wrapEl.appendChild(reason);
+      wrapEl.appendChild(ui.h('div', { class: 'hint' }, 'The sale itself is never deleted. That is the point: a voided sale stays visible so the pattern of voids can be reviewed.'));
+      const m = ui.openModal({
+        title: 'Void this sale',
+        body: wrapEl,
+        size: 'narrow',
+        footer: [
+          ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel'),
+          ui.h('button', {
+            class: 'btn btn-danger',
+            onClick: async () => {
+              const text = String(reason.value || '').trim();
+              if (text.length < 4) { ui.warn('Give a real reason — “wrong” tells nobody anything in three weeks.'); return; }
+              try {
+                await SR.api.post(`/api/sales/${encodeURIComponent(sale.id)}/void`, { reason: text }, { queue: 'auto' });
+                ui.ok('Sale voided. The stock and the ledger have been reversed.');
+                m.close();
+                load();
+              } catch (err) { ui.apiError(err); }
+            },
+          }, 'Void the sale'),
+        ],
+      });
+    }
+
+    function openSettle(sale) {
+      const wrapEl = ui.h('div', {});
+      wrapEl.appendChild(ui.h('div', { class: 'alert alert-info' }, `${U.money(sale.balance_due)} outstanding on receipt ${sale.receipt_no}.`));
+      const grid = ui.h('div', { class: 'form-grid' },
+        ui.field({ label: 'Amount (₦)', name: 'amount', type: 'number', step: '0.01', min: '0', value: U.round2(sale.balance_due), required: true }),
+        ui.field({ label: 'Method', name: 'method', value: 'CASH', options: ['CASH', 'POS_TERMINAL', 'BANK_TRANSFER', 'MOBILE_MONEY', 'USSD', 'CHEQUE'].map((m) => ({ value: m, label: U.humanise(m) })) }),
+        ui.field({ label: 'Reference', name: 'reference', span: true, hint: 'Terminal auth code, transfer reference or cheque number.' }));
+      wrapEl.appendChild(grid);
+      const extra = ui.h('div', { hidden: true });
+      const nameInput = ui.h('input', { type: 'text', value: sale.customer_name || '', placeholder: 'Customer name', autocomplete: 'name' });
+      const phoneInput = ui.h('input', { type: 'tel', value: sale.customer_phone || '', placeholder: 'Phone (optional)', autocomplete: 'tel' });
+      extra.appendChild(ui.h('div', { class: 'alert alert-warn' }, 'This is more than the balance. The difference is change owed. A collection code is printed on the receipt.'));
+      extra.appendChild(ui.h('label', { class: 'field' }, ui.h('span', { class: 'field-label' }, 'Name on the claim'), nameInput));
+      extra.appendChild(ui.h('label', { class: 'field' }, ui.h('span', { class: 'field-label' }, 'Phone'), phoneInput));
+      wrapEl.appendChild(extra);
+      const amountInput = grid.querySelector('[name="amount"]');
+      function paintExtra() {
+        const amount = Number(amountInput && amountInput.value);
+        extra.hidden = !(amount > Number(sale.balance_due) + 0.009);
+      }
+      if (amountInput) amountInput.addEventListener('input', paintExtra);
+      const m = ui.openModal({
+        title: 'Take a payment',
+        body: wrapEl,
+        size: 'narrow',
+        footer: [
+          ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel'),
+          ui.h('button', {
+            class: 'btn btn-primary',
+            onClick: async () => {
+              const v = ui.readFormStrings(wrapEl);
+              const amount = Number(v.amount);
+              if (!(amount > 0)) { ui.warn('Enter an amount.'); return; }
+              const excess = U.round2(amount - Number(sale.balance_due));
+              let claimCode = null;
+              if (excess > 0.009) {
+                const name = String(nameInput.value || '').trim();
+                if (name.length < 2) { ui.warn('Type the customer’s name. The code is how they collect the change.'); return; }
+                claimCode = U.claimCode();
+              }
+              const body = {
+                payments: [{ method: v.method, amount, reference: v.reference || null, cash_tendered: amount }],
+                claim_code: claimCode,
+                change_owed_amount: excess > 0.009 ? excess : 0,
+                customer_name: String(nameInput.value || sale.customer_name || '').trim() || null,
+                customer_phone: String(phoneInput.value || sale.customer_phone || '').trim() || null,
+              };
+              try {
+                const result = await SR.api.post(`/api/sales/${encodeURIComponent(sale.id)}/pay`, body, { queue: 'auto' });
+                const code = (result && (result.claimCode || result.claim_code)) || claimCode;
+                const owed = excess > 0.009 ? excess : 0;
+                if (code && owed > 0 && SR.store.saveLocalClaim) {
+                  await SR.store.saveLocalClaim({
+                    claim_code: code,
+                    amount: owed,
+                    customer_name: body.customer_name || sale.customer_name || 'Customer',
+                    customer_phone: body.customer_phone,
+                    sale_id: sale.id,
+                    receipt_no: sale.receipt_no,
+                    expires_at: result && (result.claimExpiresAt || result.claim_expires_at) || null,
+                    synced: result && result.queued ? 0 : 1,
+                    status: 'OUTSTANDING',
+                  });
+                }
+                m.close();
+                if (code && owed > 0) {
+                  SR.print.previewSale({
+                    receipt_no: sale.receipt_no,
+                    sold_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+                    customer_name: body.customer_name || sale.customer_name,
+                    customer_phone: body.customer_phone || sale.customer_phone,
+                    total: amount,
+                    items: [],
+                    payments: [{ method: v.method, amount, reference: v.reference || null }],
+                    change_owed: owed,
+                    claim_code: code,
+                    claim_expires_at: result && (result.claimExpiresAt || result.claim_expires_at) || null,
+                    balance_due: 0,
+                  }, {
+                    title: `Change owed · ${code}`,
+                    banner: result && result.queued ? 'The payment is on this device until the line is back. The collection code is already valid here.' : null,
+                  });
+                } else {
+                  ui.ok('Payment recorded.');
+                }
+                load();
+              } catch (err) { ui.apiError(err); }
+            },
+          }, 'Record payment'),
+        ],
+      });
+    }
+
+    function openReturn(sale, items) {
+      const wrapEl = ui.h('div', {});
+      wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'Which lines are coming back? A return restocks the goods at the cost they were sold from and reverses the revenue and the VAT on the returned lines only.'));
+      const list = ui.h('div', { class: 'stack' });
+      const chosen = new Map();
+      for (const item of items) {
+        const row = ui.h('label', { class: 'check' });
+        const cb = ui.h('input', { type: 'checkbox' });
+        cb.addEventListener('change', () => {
+          if (cb.checked) chosen.set(item.id, Number(item.quantity));
+          else chosen.delete(item.id);
+          qtyInput.disabled = !cb.checked;
+        });
+        const qtyInput = ui.h('input', { type: 'number', min: '0', max: String(item.quantity), step: 'any', value: String(item.quantity), disabled: true, style: { width: '88px', minHeight: '32px' } });
+        qtyInput.addEventListener('change', () => chosen.set(item.id, Number(qtyInput.value) || 0));
+        row.appendChild(cb);
+        row.appendChild(ui.h('span', { class: 'grow' }, `${item.product_name || item.name} — ${U.money(item.unit_price)}`));
+        row.appendChild(qtyInput);
+        list.appendChild(row);
+      }
+      wrapEl.appendChild(list);
+      const grid = ui.h('div', { class: 'form-grid', style: { marginTop: '12px' } },
+        ui.field({
+          label: 'Reason', name: 'reason_code', value: 'FAULTY',
+          options: [
+            { value: 'FAULTY', label: 'Faulty on arrival' }, { value: 'WRONG_ITEM', label: 'Wrong item' },
+            { value: 'NOT_AS_DESCRIBED', label: 'Not as described' }, { value: 'CHANGED_MIND', label: 'Changed their mind' },
+            { value: 'DAMAGED_IN_TRANSIT', label: 'Damaged in transit' }, { value: 'WARRANTY', label: 'Warranty claim' },
+            { value: 'OTHER', label: 'Other' },
+          ],
+        }),
+        ui.field({
+          label: 'Refund as', name: 'refund_method', value: 'ORIGINAL',
+          options: [
+            { value: 'ORIGINAL', label: 'Back to the original method' }, { value: 'CASH', label: 'Cash' },
+            { value: 'BANK_TRANSFER', label: 'Bank transfer' }, { value: 'STORE_CREDIT', label: 'Store credit' },
+            { value: 'EXCHANGE', label: 'Exchange — no money back' },
+          ],
+        }),
+        ui.field({ label: 'Notes', name: 'notes', type: 'textarea', span: true }));
+      wrapEl.appendChild(grid);
+      const restock = ui.h('label', { class: 'check', style: { marginTop: '8px' } },
+        ui.h('input', { type: 'checkbox', checked: true }), ui.h('span', {}, 'Put the goods back on the shelf'));
+      wrapEl.appendChild(restock);
+
+      const m = ui.openModal({
+        title: `Return against ${sale.receipt_no}`,
+        body: wrapEl,
+        size: 'wide',
+        footer: [
+          ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel'),
+          ui.h('button', {
+            class: 'btn btn-primary',
+            onClick: async () => {
+              if (!chosen.size) { ui.warn('Tick at least one line.'); return; }
+              const v = ui.readFormStrings(wrapEl);
+              try {
+                const result = await SR.api.post('/api/returns', {
+                  sale_id: sale.id,
+                  reason_code: v.reason_code,
+                  refund_method: v.refund_method,
+                  restock: restock.querySelector('input').checked ? 1 : 0,
+                  notes: v.notes || null,
+                  lines: Array.from(chosen.entries()).map(([sale_item_id, quantity]) => ({ sale_item_id, quantity })),
+                });
+                ui.ok(result.message || 'Return recorded. The stock and the books have been updated.');
+                m.close();
+                SR.app.navigate('/returns');
+              } catch (err) { ui.apiError(err); }
+            },
+          }, 'Record the return'),
+        ],
+      });
+    }
+
+    function repaintButton(sale, items, payments, serials, prescriptions, controlledRegister) {
+      return ui.h('button', {
+        class: 'btn btn-sm',
+        onClick: () => SR.print.previewSale(Object.assign({}, sale, {
+          items, payments, serials,
+          prescriptions: prescriptions || [],
+          controlled_entries: controlledRegister || [],
+        }), {
+          brand: (SR.state.settings || {}).business_name || 'StockRidge',
+          footer: (SR.state.settings || {}).receipt_footer_text || '',
+          title: null,
+        }),
+      }, 'Print');
+    }
+
+    function printQueued(record) {
+      const p = record.payload || {};
+      const items = (p.receipt_lines && p.receipt_lines.length) ? p.receipt_lines : (p.lines || []).map((line) => ({
+        product_name: line.product_name || line.name || 'Item',
+        quantity: line.quantity,
+        unit_code: line.unit_code || line.unitCode || '',
+        unit_price: line.unit_price != null ? line.unit_price : line.unitPrice,
+        line_total: line.line_total != null ? line.line_total : (Number(line.quantity) || 0) * (Number(line.unit_price != null ? line.unit_price : line.unitPrice) || 0),
+      }));
+      SR.print.previewSale({
+        receipt_no: `OFFLINE-${String(record.client_id || '').slice(-8)}`,
+        sold_at: p.sold_at || record.occurred_at,
+        sale_type: p.sale_type || 'RETAIL',
+        branch_name: SR.state.branchName ? SR.state.branchName() : (SR.state.activeBranchName && SR.state.activeBranchName()),
+        business_name: SR.state.businessName ? SR.state.businessName() : null,
+        cashier_name: (SR.state.user || {}).fullName,
+        customer_name: p.walk_in_name || p.customer_name || 'Walk-in',
+        customer_phone: p.walk_in_phone || p.customer_phone || null,
+        items,
+        payments: p.payments || [],
+        total: items.reduce((sum, item) => sum + (Number(item.line_total) || 0), 0) + (Number(p.delivery_fee) || 0) - (Number(p.discount_amount) || 0),
+        discount_amount: p.discount_amount,
+        delivery_fee: p.delivery_fee,
+        change_owed: p.change_owed_amount || 0,
+        claim_code: p.claim_code || null,
+        pcn_license_no: p.receipt_licences && p.receipt_licences.PCN,
+        nafdac_premises_no: p.receipt_licences && p.receipt_licences.NAFDAC_PREMISES,
+      }, {
+        brand: (SR.state.settings || {}).business_name || 'StockRidge',
+        footer: (SR.state.settings || {}).receipt_footer_text || '',
+        title: 'Queued sale',
+        banner: 'This sale is still on the device. The office copy will use the same lines once it syncs.',
+      });
+    }
+
+    function queuedCard(record) {
+      const p = record.payload || {};
+      const card = ui.h('div', { class: 'card' });
+      card.appendChild(ui.h('div', { class: 'card-head' }, ui.h('h2', {}, 'This sale is queued on this device')));
+      const body = ui.h('div', { class: 'card-body stack' });
+      body.appendChild(ui.h('div', { class: 'alert alert-warn' },
+        `It has not reached the office yet. It was recorded at ${U.soldAt(record.occurred_at)} and will be sent automatically. Local reference ${String(record.client_id).slice(-8)}.`));
+      body.appendChild(ui.kv([
+        ['Status', U.humanise(record.status)],
+        ['Lines', String((p.lines || []).length)],
+        ['Customer', p.customer_name || 'Walk-in'],
+        ['Attempts', String(record.attempts || 0)],
+        ['Last error', record.last_error || null],
+      ]));
+      body.appendChild(ui.h('div', { class: 'btn-row' },
+        ui.h('button', { class: 'btn btn-primary', onClick: async () => { await SR.sync.runOnce(); load(); } }, 'Sync now'),
+        ui.h('button', { class: 'btn', onClick: () => printQueued(record) }, 'Print'),
+        ui.h('button', { class: 'btn', onClick: () => SR.app.navigate('/sync') }, 'Open the queue')));
+      card.appendChild(body);
+      return card;
+    }
+
+    return wrap;
+  }
+
+  function saleIssuesCard(sale) {
+    const card = ui.h('div', {});
+    SR.api.get('/api/sale-issues', { query: { sale_id: sale.id, status: 'OPEN', branch_scope: 'all' } })
+      .then((data) => {
+        const rows = (data && data.data) || [];
+        if (!rows.length) { card.replaceChildren(); return; }
+        const body = ui.h('div', { class: 'stack' });
+        body.appendChild(ui.h('div', { class: 'alert alert-warn' },
+          'This receipt is flagged. Fix what it names, then clear it. Clearing does not delete the sale.'));
+        for (const issue of rows) body.appendChild(issueLine(issue, () => saleIssuesCardReload(card, sale)));
+        card.replaceChildren(ui.dataCard({ title: 'Flagged', table: body }));
+      })
+      .catch(() => { card.replaceChildren(); });
+    return card;
+  }
+
+  function saleIssuesCardReload(card, sale) {
+    const next = saleIssuesCard(sale);
+    card.replaceWith(next);
+  }
+
+  function roleAtLeast(min) {
+    const order = { STAFF: 1, MANAGER: 2, OWNER: 3, ADMIN: 4 };
+    const role = String((SR.state.user && SR.state.user.role) || '').toUpperCase();
+    return (order[role] || 0) >= (order[min] || 99);
+  }
+
+  function issueLine(issue, onDone) {
+    const row = ui.h('div', { class: 'stack', style: 'padding:10px 0;border-top:1px solid var(--line, #e6e1d8)' });
+    row.appendChild(ui.h('strong', {}, issue.summary || U.humanise(issue.code)));
+    row.appendChild(ui.h('p', { class: 'hint' }, issue.how || ''));
+    if (issue.detail) row.appendChild(ui.h('p', {}, issue.detail));
+    const actions = ui.h('div', { class: 'row', style: 'flex-wrap:wrap;gap:8px' });
+    if (issue.saleId) {
+      actions.appendChild(ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/sales/' + encodeURIComponent(issue.saleId)) }, 'Open receipt'));
+    }
+    if (issue.code === 'CHANGE_UNCOLLECTED') {
+      actions.appendChild(ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => SR.app.navigate('/change-owed') }, 'Open change owed'));
+    }
+    if (issue.code === 'SYNC_CONFLICT' || issue.code === 'QUARANTINED_REPLAY') {
+      actions.appendChild(ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/sync') }, 'Open sync'));
+    }
+    if (issue.status === 'OPEN' && (issue.canCorrect || issue.canClear)) {
+      actions.appendChild(ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openIssueFix(issue, onDone) }, issue.canClear ? 'Fix and clear' : 'Fix'));
+    }
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function openIssueFix(issue, onDone) {
+    const body = ui.h('div', { class: 'stack' });
+    body.appendChild(ui.h('p', {}, issue.how || ''));
+    if (issue.detail) body.appendChild(ui.h('p', { class: 'hint' }, issue.detail));
+    const inputs = [];
+    if (issue.code === 'MISSING_REFERENCE' && issue.canCorrect) {
+      for (const payment of issue.payments || []) {
+        if (!payment.needsReference) continue;
+        const input = ui.h('input', { value: payment.reference || '', placeholder: 'Terminal, transfer or cheque reference' });
+        body.appendChild(ui.h('label', { class: 'ctl' }, `${U.humanise(payment.method)} · ${U.money(payment.amount)}`));
+        body.appendChild(input);
+        inputs.push({ id: payment.id, input });
+      }
+    }
+    let nameInput = null;
+    let phoneInput = null;
+    let extraNote = null;
+    if (issue.canCorrect && issue.saleId) {
+      nameInput = ui.h('input', { value: issue.customerName || '' });
+      phoneInput = ui.h('input', { value: issue.customerPhone || '' });
+      extraNote = ui.h('textarea', { rows: 2, placeholder: 'A note on this receipt, if the name is not the problem' });
+      body.appendChild(ui.h('label', { class: 'ctl' }, 'Customer name on this receipt'));
+      body.appendChild(nameInput);
+      body.appendChild(ui.h('label', { class: 'ctl' }, 'Phone on this receipt'));
+      body.appendChild(phoneInput);
+      body.appendChild(ui.h('div', { class: 'hint' }, 'This changes the receipt only. It does not rename the customer, and it does not change the total.'));
+      body.appendChild(extraNote);
+    }
+    let journalInput = null;
+    let clearNote = null;
+    if (issue.canClear) {
+      if (issue.needsReference) {
+        journalInput = ui.h('input', { placeholder: 'Journal entry number' });
+        body.appendChild(ui.h('label', { class: 'ctl' }, 'Journal entry that covers this sale'));
+        body.appendChild(journalInput);
+      }
+      clearNote = ui.h('textarea', { rows: 3, placeholder: 'What you checked' });
+      body.appendChild(ui.h('label', { class: 'ctl' }, 'What you checked'));
+      body.appendChild(clearNote);
+      if (issue.clearRole) body.appendChild(ui.h('div', { class: 'hint' }, `A ${String(issue.clearRole).toLowerCase()} clears this. The sale stays in the book.`));
+    } else if (issue.clearRole && !roleAtLeast(issue.clearRole)) {
+      body.appendChild(ui.h('div', { class: 'hint' }, `A ${String(issue.clearRole).toLowerCase()} clears this after the data is fixed.`));
+    }
+
+    const save = ui.h('button', { class: 'btn btn-primary', onClick: saveCorrection }, 'Save the correction');
+    const clearBtn = issue.canClear
+      ? ui.h('button', { class: 'btn', onClick: clearFlag }, 'Clear the flag')
+      : null;
+    const modal = ui.openModal({
+      title: issue.receiptNo ? `Flagged · ${issue.receiptNo}` : (issue.summary || 'Flagged sale'),
+      body,
+      footer: [clearBtn, issue.canCorrect || inputs.length ? save : null].filter(Boolean),
+      size: 'narrow',
+    });
+
+    async function saveCorrection() {
+      save.disabled = true;
+      try {
+        const payload = { payments: inputs.map((row) => ({ id: row.id, reference: row.input.value.trim() })) };
+        if (nameInput) payload.customer_name = nameInput.value.trim();
+        if (phoneInput) payload.customer_phone = phoneInput.value.trim();
+        if (extraNote && extraNote.value.trim()) payload.note = extraNote.value.trim();
+        await SR.api.post('/api/sale-issues/' + encodeURIComponent(issue.id) + '/correct', payload);
+        ui.ok('Saved. The total was not changed.');
+        modal.close();
+        if (onDone) onDone();
+      } catch (err) {
+        ui.apiError(err);
+      } finally {
+        save.disabled = false;
+      }
+    }
+
+    async function clearFlag() {
+      const note = clearNote ? clearNote.value.trim() : '';
+      if (note.length < 8) { ui.warn('Say what you checked, in at least a few words.'); return; }
+      clearBtn.disabled = true;
+      try {
+        await SR.api.post('/api/sale-issues/' + encodeURIComponent(issue.id) + '/clear', {
+          note,
+          reference: journalInput ? journalInput.value.trim() : undefined,
+        });
+        ui.ok('Cleared. The sale is still in the book.');
+        modal.close();
+        if (onDone) onDone();
+      } catch (err) {
+        ui.apiError(err);
+      } finally {
+        clearBtn.disabled = false;
+      }
+    }
+  }
+
+  async function renderIssues(ctx) {
+    ctx.setTitle('Flagged sales');
+    const state = { status: 'OPEN' };
+    const wrap = ui.h('div', { class: 'stack' });
+    wrap.appendChild(ui.h('div', { class: 'page-head' },
+      ui.h('div', {},
+        ui.h('h1', {}, 'Flagged sales'),
+        ui.h('p', { class: 'sub' }, 'Fix the data, then clear the flag. A voided sale stays in the book. Nothing here deletes a sale or changes what was paid.')),
+      ui.h('div', { class: 'actions' },
+        ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/sales') }, 'All sales'),
+        ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => load() }, 'Check again'))));
+    const tabs = ui.h('div', { class: 'tabs' });
+    for (const [key, label] of [['OPEN', 'Open'], ['CLEARED', 'Cleared']]) {
+      tabs.appendChild(ui.h('button', {
+        class: `tab ${state.status === key ? 'is-active' : ''}`,
+        onClick: (ev) => {
+          state.status = key;
+          for (const b of ev.currentTarget.parentElement.children) b.classList.remove('is-active');
+          ev.currentTarget.classList.add('is-active');
+          load();
+        },
+      }, label));
+    }
+    wrap.appendChild(tabs);
+    const host = ui.h('div', { class: 'stack' });
+    wrap.appendChild(host);
+    await load();
+    return wrap;
+
+    async function load() {
+      host.replaceChildren(ui.skeleton(5));
+      let data;
+      try {
+        data = await SR.api.get('/api/sale-issues', { query: Object.assign({ status: state.status }, SR.state.query()) });
+      } catch (err) {
+        host.replaceChildren(ui.errorBlock(err, { retry: { label: 'Try again', run: load } }));
+        return;
+      }
+      const rows = data.data || [];
+      const stack = ui.h('div', { class: 'stack' });
+      if (!rows.length) {
+        stack.appendChild(ui.empty({
+          title: state.status === 'OPEN' ? 'Nothing is flagged' : 'Nothing has been cleared',
+          message: 'A late posting, a balance still owed, change not collected, a transfer with no reference, a missing journal, or a sale held back after a cleanup shows up here.',
+        }));
+        host.replaceChildren(stack);
+        return;
+      }
+      if (state.status === 'OPEN') {
+        const groups = new Map();
+        for (const issue of rows) groups.set(issue.code, (groups.get(issue.code) || 0) + 1);
+        for (const [code, count] of groups) {
+          const sample = rows.find((row) => row.code === code);
+          if (!sample || !sample.canClear || count < 2 || sample.needsReference) continue;
+          stack.appendChild(ui.h('div', { class: 'alert' },
+            ui.h('div', {}, `${count} open “${sample.summary}” flags. Clear them together only after you have checked them.`),
+            ui.h('button', { class: 'btn btn-sm', onClick: () => clearGroup(code, sample.summary) }, 'Clear these')));
+        }
+      }
+      for (const issue of rows) {
+        const card = ui.h('div', { class: 'card' });
+        const body = ui.h('div', { class: 'card-body stack' });
+        body.appendChild(ui.h('div', { class: 'row', style: 'justify-content:space-between;gap:8px;flex-wrap:wrap' },
+          ui.h('strong', {}, issue.receiptNo || 'Not a receipt yet'),
+          ui.badge(issue.status === 'OPEN' ? 'Open' : 'Cleared', issue.status === 'OPEN' ? 'badge-warn' : 'badge-mute')));
+        body.appendChild(ui.h('div', {}, issue.summary));
+        if (issue.soldAt) body.appendChild(ui.h('div', { class: 'hint' }, U.soldAt(issue.soldAt)));
+        if (issue.customerName) body.appendChild(ui.h('div', { class: 'hint' }, issue.customerName));
+        body.appendChild(issueLine(issue, load));
+        if (issue.status === 'CLEARED' && issue.clearNote) body.appendChild(ui.h('p', { class: 'hint' }, issue.clearNote));
+        card.appendChild(body);
+        stack.appendChild(card);
+      }
+      host.replaceChildren(stack);
+    }
+
+    async function clearGroup(code, summary) {
+      const note = await ui.promptDialog({
+        title: `Clear every “${summary}”`,
+        label: 'What you checked',
+        required: true,
+        multiline: true,
+        hint: 'This clears the flags in the branches you can see. It does not delete the sales.',
+      });
+      if (!note) return;
+      if (note.length < 8) { ui.warn('Say what you checked, in at least a few words.'); return; }
+      try {
+        const result = await SR.api.post('/api/sale-issues/clear-matching', { code, note });
+        ui.ok(`Cleared ${result.cleared}. The sales are still in the book.`);
+        load();
+      } catch (err) { ui.apiError(err); }
+    }
+  }
+
+  SR.views = SR.views || {};
+  SR.views.sales = { render };
+}(window));

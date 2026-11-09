@@ -1,0 +1,134 @@
+name: Deploy StockRidge production
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - arena/710a3fbd-stock-ridge
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stockridge-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arena/710a3fbd-stock-ridge
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify required secret presence
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$TURSO_DATABASE_URL"
+          test -n "$TURSO_AUTH_TOKEN"
+          test "${#JWT_SECRET}" -ge 32
+
+      # SQLCipher is only for native wrappers. Do not compile it in Worker CI.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm run check
+      - run: npm run turso:check
+      - name: Run Turso migrations with API-readable failure evidence
+        run: |
+          set +e
+          output="$(npm run turso:migrate 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            escaped="$(printf '%s\n' "$output" | tail -n 12 | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g')"
+            printf '::error::%s\n' "$escaped"
+            exit "$status"
+          fi
+
+      - name: Run explicitly requested idempotent PDF seed
+        if: hashFiles('production-seed-request.txt') != ''
+        env:
+          SEED_CONFIRM: SEED_PRODUCTION
+        run: |
+          test "$(cat production-seed-request.txt)" = "SEED_PRODUCTION"
+          node tools/seed-pin-production.js
+
+      - name: Configure Worker secrets
+        run: |
+          printf '%s' "$TURSO_AUTH_TOKEN" | npx wrangler secret put TURSO_AUTH_TOKEN --env "" --config worker/wrangler.toml
+          printf '%s' "$JWT_SECRET" | npx wrangler secret put JWT_SECRET --env "" --config worker/wrangler.toml
+
+      - run: npx wrangler deploy --dry-run --env "" --config worker/wrangler.toml --outdir .cache/worker-dry-run
+      - run: npm run worker:deploy
+
+      - name: Attach beta explicitly to workers.dev
+        run: |
+          response="$(curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{"enabled":true}' \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/beta/subdomain")"
+          printf '%s\n' "$response"
+          printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.success||!r.result||r.result.enabled!==true)process.exit(1)})"
+
+      - name: Confirm public Workers hostname
+        run: |
+          account="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain")"
+          printf '%s\n' "$account"
+          host="$(printf '%s' "$account" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).result.subdomain))")"
+          printf '::notice::Cloudflare Workers subdomain is %s; beta URL is https://beta.%s.workers.dev\n' "$host" "$host"
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/beta/subdomain"
+          printf '\n'
+
+      - name: Verify deployed readiness
+        run: |
+          response="$(curl --fail --silent --show-error --retry 24 --retry-all-errors --retry-delay 5 https://beta.stockridge0.workers.dev/api/diagnose)"
+          printf '%s\n' "$response"
+          printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.ok)process.exit(1)})"
+
+      - name: Exercise demo login and dashboard without exposing credentials
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const doc = fs.readFileSync('docs/DEMO_SIGNINS.md', 'utf8');
+          const row = doc.split('\n').find((line) => line.includes('`bmstaff1abuja`'));
+          const cells = row.split('|').map((cell) => cell.trim());
+          const username = cells[1].replaceAll('`', '');
+          const pin = cells[4].replaceAll('`', '');
+          const base = 'https://beta.stockridge0.workers.dev';
+          const started = Date.now();
+          const login = await fetch(base + '/api/auth/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ username, pin, remember: false, deviceId: 'deploy-smoke-demo' }),
+          });
+          const auth = await login.json();
+          if (!login.ok || !auth.token || !auth.profile) throw new Error(`Demo login failed: ${login.status} ${auth.code || ''}`);
+          const profile = auth.profile;
+          const query = new URLSearchParams({ business_id: profile.businessId, branch_id: profile.branchId });
+          const dashboard = await fetch(base + '/api/dashboard?' + query, {
+            headers: { authorization: `Bearer ${auth.token}`, accept: 'application/json' },
+          });
+          const body = await dashboard.json();
+          if (!dashboard.ok) throw new Error(`Dashboard failed: ${dashboard.status} ${body.code || ''} ${body.error || ''}`);
+          console.log(`Demo login and dashboard passed in ${Date.now() - started}ms; credentials and token withheld.`);
+          JS
+
+

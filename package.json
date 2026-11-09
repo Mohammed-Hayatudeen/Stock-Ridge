@@ -1,0 +1,67 @@
+{
+  "name": "stockridge",
+  "version": "1.0.0",
+  "private": true,
+  "author": "StockRidge",
+  "description": "StockRidge inventory, POS and back-office — one Worker/Turso backend with PWA, Electron and Android clients",
+  "type": "commonjs",
+  "main": "electron/main.js",
+  "homepage": "https://github.com/Mohammed-Hayatudeen/Stock-Ridge",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mohammed-Hayatudeen/Stock-Ridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mohammed-Hayatudeen/Stock-Ridge/issues"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check worker/src/index.mjs && node tools/verify-source.js",
+    "stamp": "node tools/stamp-build.js",
+    "worker:dev": "wrangler dev --config worker/wrangler.toml",
+    "worker:deploy": "npm run check && wrangler deploy --env \"\" --config worker/wrangler.toml",
+    "turso:migrate": "node tools/turso-admin.js migrate",
+    "turso:check": "node tools/turso-admin.js check",
+    "electron": "electron .",
+    "electron:start": "electron .",
+    "electron:stage": "node tools/stage-ui.js",
+    "electron:build": "npm run check && npm run electron:stage && electron-builder",
+    "electron:build:win": "npm run check && npm run electron:stage && electron-builder --win dir --config.win.signAndEditExecutable=false",
+    "electron:build:linux": "npm run check && npm run electron:stage && electron-builder --linux AppImage",
+    "electron:build:mac": "npm run check && npm run electron:stage && electron-builder --mac zip dmg",
+    "android:build": "npm run check && node tools/android-build.js debug",
+    "android:build:release": "npm run check && node tools/android-build.js release",
+    "android:install": "npm run android:build && node tools/adb-run.js install -r android/app/build/outputs/apk/debug/app-debug.apk"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "overrides": {
+    "minimatch": "11.0.1"
+  },
+  "dependencies": {
+    "better-sqlite3-multiple-ciphers": "13.0.3"
+  },
+  "devDependencies": {
+    "electron": "44.10.0",
+    "electron-builder": "26.18.1",
+    "wrangler": "^4.50.0"
+  },
+  "build": {
+    "appId": "com.stockridge.desktop",
+    "productName": "StockRidge",
+    "artifactName": "StockRidge-${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "npmRebuild": false,
+    "asarUnpack": ["**/node_modules/better-sqlite3-multiple-ciphers/**"],
+    "files": ["electron/**/*", "lib/**/*", "public/**/*", "package.json"],
+    "extraResources": [
+      {"from": "build/stockridge", "to": "stockridge"},
+      {"from": "build/desktop-config.json", "to": "desktop-config.json"}
+    ],
+    "directories": {"output": "dist", "buildResources": "build"},
+    "linux": {"target": ["AppImage"], "category": "Office"},
+    "win": {"target": ["dir"], "signAndEditExecutable": false},
+    "mac": {"target": ["zip", "dmg"], "category": "public.app-category.business"}
+  }
+}
