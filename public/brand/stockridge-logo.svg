@@ -25,8 +25,8 @@
   <g id="ridges">
     <path id="left-ridge" d="M64 376V330L105 282L148 164L184 258L224 340V376Z" fill="#1d6847"/>
     <path id="right-ridge" d="M288 376L326 304L366 174L405 278L448 326V376Z" fill="#155237"/>
-    <path id="middle-ridge" d="M124 376L166 310L198 238L226 180L256 96L286 180L314 238L346 310L388 376Z" fill="url(#ridge-center)"/>
-    <path d="M124 376L166 310L198 238L226 180L256 96L286 180L314 238L346 310L388 376" fill="none" stroke="#c5f4d8" stroke-opacity="0.24" stroke-width="2" stroke-linejoin="round"/>
+    <path id="middle-ridge" d="M108 376L132 286L154 202L184 142L218 110L256 96L294 110L328 142L358 202L380 286L404 376Z" fill="url(#ridge-center)"/>
+    <path d="M108 376L132 286L154 202L184 142L218 110L256 96L294 110L328 142L358 202L380 286L404 376" fill="none" stroke="#c5f4d8" stroke-opacity="0.24" stroke-width="2" stroke-linejoin="round"/>
   </g>
 
   <g id="stacked-blocks" stroke-linejoin="round" transform="translate(-64 46) scale(1.25 .8)">
