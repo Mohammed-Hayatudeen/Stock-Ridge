@@ -1,0 +1,11 @@
+### R036: Premium Kaaba & Emerald Mountains Brand Redesign
+- **Date:** 2026-11-09
+- **Prompt Link:** User requested redesigning the brand mark to make the cube proportional to the Kaaba (front-view, black) and shape the emerald ridges like premium professional mountains.
+- **Analysis & Root Cause:** 
+  - The previous logo featured three overlapping emerald/black blocks and flat, simple polygonal ridges. To meet the user's vision, the structure needed a depth-based landscape with faceted mountain geometry, overlaid by a minimalist and stately Kaaba structure.
+- **Changes Applied:**
+  - Redesigned `public/brand/mark.svg`, `public/brand/stockridge-logo.svg`, and `public/icons/icon.svg`.
+  - Converted the background ridges into overlapping premium emerald mountain facets with subtle geometric highlights and correct painter's-algorithm z-index depth (center peak tallest in the back, side peaks in the front).
+  - Replaced the stacked blocks with a single monolithic front-facing Kaaba block, sized precisely to Kaaba proportions (~11:13 ratio; `174x200`).
+  - Styled the block with a deep premium black gradient and a subtle gold Hizam band near the top to gracefully evoke the Kaaba aesthetic.
+- **Verification Log:** SVG code verified, replaced across all asset paths, and committed.
