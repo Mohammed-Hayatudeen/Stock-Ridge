@@ -758,11 +758,20 @@ function mount(app, base = '/api') {
       for (const piece of shelf.where) where.push(piece);
       params.push(...shelf.params);
       if (spec.onStock && stockGate && stockGate.any) {
-        const user = ctx.get('user');
         const column = table === 'products' ? 'id' : 'product_id';
-        const userScope = table === 'products' ? 'created_by = ?' : 'product_id IN (SELECT id FROM products WHERE created_by = ?)';
-        where.push(`(${column} IN (SELECT product_id FROM stock_batches WHERE ${stockGate.held.where.join(' AND ')}) OR ${userScope})`);
-        params.push(...stockGate.held.params, String(user.id));
+        let bizScope = '';
+        const bizParams = [];
+        if (biz) {
+          bizScope = table === 'products' ? 'business_id = ?' : `${column} IN (SELECT id FROM products WHERE business_id = ?)`;
+          bizParams.push(String(biz));
+        }
+        if (bizScope) {
+          where.push(`(${column} IN (SELECT product_id FROM stock_batches WHERE ${stockGate.held.where.join(' AND ')}) OR ${bizScope})`);
+          params.push(...stockGate.held.params, ...bizParams);
+        } else {
+          where.push(`${column} IN (SELECT product_id FROM stock_batches WHERE ${stockGate.held.where.join(' AND ')})`);
+          params.push(...stockGate.held.params);
+        }
       }
       const afterRaw = paging ? afterMap[table] : null;
       const afterId = afterRaw == null ? '' : String(afterRaw).trim();
