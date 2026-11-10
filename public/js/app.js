@@ -638,7 +638,7 @@
   // not send the till back to the old wordmark either.
   function defaultMarkUrl(b) {
     const fromApi = b && b.defaultLogoUrl;
-    const chosen = (fromApi && String(fromApi).indexOf('/brand/logo.jpg') === 0) ? String(fromApi) : '/brand/logo.jpg';
+    const chosen = (fromApi && String(fromApi).indexOf('/brand/mark.svg') === 0) ? String(fromApi) : '/brand/mark.svg';
     if (!SR.BUILD || /[?&]v=/.test(chosen)) return chosen;
     return chosen + '?v=' + SR.BUILD;
   }

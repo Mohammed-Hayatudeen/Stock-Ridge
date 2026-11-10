@@ -662,6 +662,18 @@ function mount(app, base = '/api') {
     // One look at the shelf for this request. An empty shelf must not open
     // the product table, the market list, or the Greenbook.
     let stockGate = null;
+    const needsStockGate = requested.some((t) => PULLABLE[t] && PULLABLE[t].onStock);
+    if (needsStockGate) {
+      const held = stockScope(scope, { includeAllBusinesses, includeAllBranches, biz, branch });
+      const hit = await db.first(
+        `SELECT 1 AS ok FROM stock_batches WHERE ${held.where.join(' AND ')} LIMIT 1`,
+        held.params,
+      );
+      stockGate = { any: Boolean(hit), held };
+    }
+
+    const statements = [];
+    const tableOrder = [];
     for (const table of requested) {
       // Only tables that exist and are safe to mirror. A device must not be able
       // to ask for `gl_journal_lines` or `audit_log` and receive them.
@@ -680,15 +692,7 @@ function mount(app, base = '/api') {
       }
       const spec = PULLABLE[table];
       if (spec.onStock) {
-        if (!stockGate) {
-          const held = stockScope(scope, { includeAllBusinesses, includeAllBranches, biz, branch });
-          const hit = await db.first(
-            `SELECT 1 AS ok FROM stock_batches WHERE ${held.where.join(' AND ')} LIMIT 1`,
-            held.params,
-          );
-          stockGate = { any: Boolean(hit), held };
-        }
-        if (!stockGate.any) {
+        if (!stockGate || !stockGate.any) {
           out[table] = { rows: [], count: 0, truncated: false };
           continue;
         }
@@ -799,16 +803,25 @@ function mount(app, base = '/api') {
       // index, so it scans the table and reads rows the till already stored.
       // Name order plus an id cursor skips and repeats. That stays off.
       if (!where.length) where.push('1 = 1');
-      let rows;
+      const sql = `SELECT ${cols} FROM ${table} WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ?`;
+      statements.push({ sql, params: [...params, tableLimit] });
+      tableOrder.push({ table, tableLimit });
+    }
+
+    let batchResults = [];
+    if (statements.length > 0) {
       try {
-        rows = await db.all(`SELECT ${cols} FROM ${table} WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ?`, [...params, tableLimit]);
+        batchResults = await readBatch(db, statements);
       } catch (e) {
-        out[table] = { error: e.message, rows: [] };
-        continue;
+        throw new Error('Sync batch read failed: ' + e.message);
       }
-      if (table === 'stock_batches' && rows.length) rows = await attachStockProductNames(db, rows);
-      out[table] = { rows, count: rows.length, truncated: rows.length >= tableLimit };
-      totalRows += rows.length;
+      for (let i = 0; i < tableOrder.length; i++) {
+        const { table, tableLimit } = tableOrder[i];
+        let rows = batchResults[i] || [];
+        if (table === 'stock_batches' && rows.length) rows = await attachStockProductNames(db, rows);
+        out[table] = { rows, count: rows.length, truncated: rows.length >= tableLimit };
+        totalRows += rows.length;
+      }
     }
 
     // client_settings is a single global row and has no business_id, so it is
@@ -1014,6 +1027,16 @@ function mount(app, base = '/api') {
  * across branches) and must stay visible, while a row WITH a branch is visible
  * only inside it.
  */
+
+async function readBatch(db, statements) {
+  const list = statements || [];
+  if (!list.length) return [];
+  if (typeof db.readBatch === 'function') return db.readBatch(list);
+  const rows = [];
+  for (const statement of list) rows.push(await db.all(statement.sql, statement.params));
+  return rows;
+}
+
 function stockScope(scope, { includeAllBusinesses, includeAllBranches, biz, branch } = {}) {
   const where = ['is_deleted = 0', 'quantity > 0'];
   const params = [];
