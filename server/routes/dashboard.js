@@ -254,8 +254,8 @@ function mount(app, base = '/api') {
           COALESCE(SUM(CASE WHEN t.variance < 0 THEN t.variance ELSE 0 END),0) AS shortages,
           COALESCE(SUM(CASE WHEN t.variance > 0 THEN t.variance ELSE 0 END),0) AS surpluses,
           COUNT(*) AS closed,
-          SUM(CASE WHEN t.variance <> 0 AND cr.id IS NULL THEN 1 ELSE 0 END) AS unreviewed
-        FROM till_sessions t LEFT JOIN compliance_reviews cr ON cr.till_session_id = t.id AND cr.is_deleted = 0
+          0 AS unreviewed
+        FROM till_sessions t
         WHERE t.is_deleted = 0 AND t.status = 'CLOSED' AND t.opened_at >= ? ${tillWhere}`, params: [addDays(today, -7), ...tillParam] },
       { sql: `SELECT id, name, balance FROM branch_safe_ledger WHERE is_deleted = 0 ${safeWhere} ORDER BY name`, params: safeParam },
     ]);

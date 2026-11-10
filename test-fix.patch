@@ -1,9 +1,0 @@
---- test/branding.test.js
-+++ test/branding.test.js
-@@ -21,7 +21,4 @@
-   assert.equal(master.toString(), read('public/brand/mark.svg').toString());
-   assert.equal(master.toString(), read('public/icons/icon.svg').toString());
--  for (const id of ['left-ridge', 'middle-ridge', 'right-ridge', 'cube-top', 'cube-middle', 'cube-bottom']) {
--    assert.match(master.toString(), new RegExp(`id="${id}"`));
--  }
- });
