@@ -42,11 +42,7 @@
       <stop offset="1" stop-color="#000000"/>
     </linearGradient>
     
-    <linearGradient id="gold-band" x1="169" y1="220" x2="343" y2="220" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#f5d76e"/>
-      <stop offset="0.5" stop-color="#f1c40f"/>
-      <stop offset="1" stop-color="#d4ac0d"/>
-    </linearGradient>
+    
   </defs>
 
   <rect x="16" y="16" width="480" height="480" rx="104" fill="url(#backdrop)"/>
@@ -85,10 +81,6 @@
     <rect x="169" y="176" width="174" height="200" fill="url(#kaaba-front)" stroke="#444" stroke-opacity="0.8" stroke-width="1.5"/>
     
     <!-- Subtle Gold Band (Hizam) -->
-    <rect x="169.75" y="214" width="172.5" height="12" fill="url(#gold-band)"/>
-    <path d="M169.75 226 L342.25 226" fill="none" stroke="#c29a0c" stroke-width="1"/>
-    <path d="M169.75 214 L342.25 214" fill="none" stroke="#ffeb99" stroke-width="1"/>
-    
     <!-- Crisp Top Edge Highlight -->
     <path d="M169.75 176.75 L342.25 176.75" fill="none" stroke="#555" stroke-opacity="0.9" stroke-width="1.5"/>
   </g>

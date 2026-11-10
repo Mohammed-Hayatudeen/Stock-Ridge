@@ -100,9 +100,18 @@
   async function changedOnly(table, rows) {
     await ready();
     if (typeof native.changedOnly === 'function') {
-      return native.changedOnly(table, rows);
+      return native.changedOnly(table, rows).catch(() => rows);
     }
-    return rows;
+    const out = [];
+    for (const row of rows || []) {
+      if (!row || row.id == null) continue;
+      const next = row.updated_at == null || row.updated_at === '' ? null : String(row.updated_at);
+      if (!next) { out.push(row); continue; }
+      const local = await get(table, row.id).catch(() => null);
+      const prev = local && local.updated_at != null && local.updated_at !== '' ? String(local.updated_at) : null;
+      if (prev !== next) out.push(row);
+    }
+    return out;
   }
 
   async function putMany(table, rows) {
