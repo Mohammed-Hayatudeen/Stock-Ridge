@@ -478,7 +478,7 @@ function mount(app, base = '/api') {
       },
 
       period: {
-        from, to,
+        from: today, to: today,
         sales: Number(period.count) || 0,
         grossRevenue: round2(Number(period.gross)),
         vat: round2(Number(period.vat)),
