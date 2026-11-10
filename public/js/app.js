@@ -27,8 +27,8 @@
   const U = SR.util;
   const ui = SR.ui;
 
-  SR.APP_VERSION = '1.0.0';
-  SR.BUILD = 'ridge-20261109-1609-eeb2d71';
+  SR.APP_VERSION = '1.0.1';
+  SR.BUILD = 'ridge-20261110-1120-135b79b';
 
   // -------------------------------------------------------------------
   // INSTALL
