@@ -257,7 +257,7 @@ function mount(app, base = '/api') {
           0 AS unreviewed
         FROM till_sessions t
         WHERE t.is_deleted = 0 AND t.status = 'CLOSED' AND t.opened_at >= ? ${tillWhere}`, params: [addDays(today, -7), ...tillParam] },
-      { sql: `SELECT id, name, balance FROM branch_safe_ledger WHERE is_deleted = 0 ${safeWhere} ORDER BY name`, params: safeParam },
+      { sql: `SELECT COALESCE(SUM(amount), 0) AS balance FROM branch_safe_ledger WHERE is_deleted = 0 ${safeWhere}`, params: safeParam },
     ]);
 
     let groupRef = null;
@@ -369,7 +369,8 @@ function mount(app, base = '/api') {
     const cashReads = batchResults.slice(cashRef.start, cashRef.end);
     const openTills = cashReads[0];
     const variance = firstRow(cashReads[1]);
-    const cash = cashReads[2];
+    const safe = firstRow(cashReads[2]) || { balance: 0 };
+    const cash = [];
 
     let byBranch = null;
     let byBusiness = null;
