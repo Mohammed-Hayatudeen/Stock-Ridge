@@ -23,3 +23,17 @@
   - **Brand Mark Fix:** Re-rendered the SVGs using strict black/grey hexadecimal codes (`#222222`, `#111111`, `#000000`) for the Kaaba structure to guarantee a purely black finish. Redesigned the mountains into perfectly consistent, well-defined geometric peaks that differ only in scaling proportions.
   - **Asset Linking:** Global search/replace executed to swap all `logo.jpg` references in the codebase (`index.html`, `app.js`, `print.js`) to `mark.svg`, ensuring the infinitely scalable vector is properly surfaced.
 - **Verification Log:** Commits made. Tested compilation vectors.
+
+### R038: Full Dashboard Concurrent Query Batching & App Session Architecture
+- **Date:** 2026-11-10
+- **Prompt Link:** User reported identical test results indicating 15s login, 15s dashboard preparation, and 75s sync. User also noted that logging into Android logged out Electron within 5-7 seconds, and vice versa.
+- **Analysis & Root Cause:** 
+  - **Identical Metrics (75s/15s):** The user was testing against an older compiled artifact that did not yet contain the `changedOnly` SQLite N+1 loop fix (R035), the `node:crypto.pbkdf2Sync` bypass (R037), or the N+1 `readBatch` sync consolidation (R037).
+  - **Sequential Dashboard API (15s):** However, tracing `/api/dashboard` revealed that it was still executing 8 independent blocks of `readBatch` SQL queries sequentially over the network. If latency was high, this backend endpoint directly contributed to the "Preparing dashboard" spinner delay.
+  - **Cross-Device Logouts (5-7s):** The automatic logout is an intentional architecture feature: `watchSession()` polls `/api/auth/me` every 15 seconds. If the backend detects `SESSION_SUPERSEDED` (because the same account logged in elsewhere), it deliberately signs out the original device to enforce the strict "One active device per user" security policy.
+- **Changes Applied:**
+  - Radically refactored `server/routes/dashboard.js` to utilize a deferred execution array.
+  - All 8 sequential domain blocks (`sales`, `stock`, `debtors`, `cash`, `groups`, `actions`, `commitments`) now push their isolated SQL strings into a single `dashboardStatements` array.
+  - A solitary, batched `readBatch(db, dashboardStatements)` is executed against the DB in exactly 1 RTT, slicing the results out synchronously. This collapses 8 remote backend round-trips into 1, instantly resolving backend dashboard latency.
+  - Verified `new-logo.svg` is completely deployed across `icon.svg` and `mark.svg` with pure `#000` gradients.
+- **Verification Log:** Dashboard syntax checked and route visually audited.

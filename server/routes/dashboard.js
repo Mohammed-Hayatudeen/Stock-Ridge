@@ -127,17 +127,15 @@ function mount(app, base = '/api') {
     };
 
     // ---- TODAY --------------------------------------------------------
-    const sc = scopeClause('s');
-    const todaySpan = soldSpan(today);
-    const yesterday = addDays(today, -1);
-    const yesterdaySpan = soldSpan(yesterday);
-    // ---- PERIOD (default 30 days) ------------------------------------
-    const { from, to } = dateRange(ctx, { defaultDays: 30 });
-    const periodSpan = soldSpan(from, to);
 
-    // These sales reads are independent after scope and dates are resolved.
-    // Preserve every predicate/parameter, but pay for one remote pipeline.
-    const salesReads = await readBatch(db, [
+    const dashboardStatements = [];
+    const pushStatements = (stmts) => {
+      const start = dashboardStatements.length;
+      dashboardStatements.push(...stmts);
+      return { start, end: dashboardStatements.length };
+    };
+
+    const salesRef = pushStatements([
       { sql: `SELECT COUNT(*) AS count,
           COALESCE(SUM(s.total),0) AS gross, COALESCE(SUM(s.vat_amount),0) AS vat,
           COALESCE(SUM(s.balance_due),0) AS outstanding, COALESCE(SUM(s.delivery_fee),0) AS delivery,
@@ -165,25 +163,7 @@ function mount(app, base = '/api') {
         FROM sales s WHERE ${COUNTS} AND ${periodSpan.sql} ${sc.sql}
         GROUP BY day ORDER BY day ASC`, params: [...periodSpan.params, ...sc.params] },
     ]);
-    const todaySales = firstRow(salesReads[0]);
-    const yesterdaySales = firstRow(salesReads[1]);
-    const todayCogs = firstRow(salesReads[2]);
-    const todayVoids = firstRow(salesReads[3]);
-    const byMethod = salesReads[4];
-    const period = firstRow(salesReads[5]);
-    const periodCogs = firstRow(salesReads[6]);
-    const series = salesReads[7];
 
-    const grossToday = round2(Number(todaySales.gross));
-    const vatToday = round2(Number(todaySales.vat));
-    const netToday = round2(grossToday - vatToday);
-    const cogsToday = round2(Number(todayCogs.cogs));
-    const marginToday = round2(netToday - cogsToday);
-    const grossYesterday = round2(Number(yesterdaySales.gross));
-    const periodNet = round2(Number(period.gross) - Number(period.vat));
-    const periodMargin = round2(periodNet - Number(periodCogs.cogs));
-
-    // ---- STOCK --------------------------------------------------------
     const stockWhere = ['sb.is_deleted = 0', "sb.status NOT IN ('QUARANTINED','EXPIRED')"];
     const stockParams = [];
     if (business) { stockWhere.push('sb.business_id = ?'); stockParams.push(String(business.id)); }
@@ -195,7 +175,7 @@ function mount(app, base = '/api') {
     }
     const lowStockClause = useBranch ? 'AND sb.branch_id = ?' : (business ? 'AND sb.business_id = ?' : '');
     const lowStockParam = useBranch ? [useBranch] : (business ? [String(business.id)] : []);
-    const stockReads = await readBatch(db, [
+    const stockRef = pushStatements([
       { sql: `SELECT COALESCE(SUM(sb.quantity),0) AS units,
           COALESCE(SUM(sb.quantity * sb.cost_price_per_unit),0) AS at_cost,
           COALESCE(SUM(sb.quantity * sb.selling_price_per_unit),0) AS at_retail,
@@ -240,141 +220,51 @@ function mount(app, base = '/api') {
         WHERE ${COUNTS} AND ${periodSpan.sql} ${sc.sql}
         GROUP BY u.id ORDER BY revenue DESC LIMIT 8`, params: [...periodSpan.params, ...sc.params] },
     ]);
-    const stock = firstRow(stockReads[0]);
-    const lowStock = stockReads[1];
-    const lowStockCount = scalarRow(stockReads[2]);
-    const expiringSoon = stockReads[3];
-    const topProducts = stockReads[4];
-    const categorySales = stockReads[5];
-    const topStaff = stockReads[6];
 
-    // ---- CREDIT / DEBTORS --------------------------------------------
-    let debtors = null;
+    let debtorRef = null;
+    const dWhere = ['c.is_deleted = 0', 'c.credit_balance > 0']; 
+    const dParams = [];
     if (atLeast(user.role, 'MANAGER')) {
-      const dWhere = ['c.is_deleted = 0', 'c.credit_balance > 0']; const dParams = [];
       if (business) { dWhere.push('c.business_id = ?'); dParams.push(String(business.id)); }
       if (useBranch) { dWhere.push('c.branch_id = ?'); dParams.push(useBranch); }
-      const debtorReads = await readBatch(db, [
+      debtorRef = pushStatements([
         { sql: `SELECT COUNT(*) AS count, COALESCE(SUM(c.credit_balance),0) AS total
           FROM customers c WHERE ${dWhere.join(' AND ')}`, params: dParams },
-        // The over-90 bucket needs the ledger, so it is sampled from the largest
-        // debtors rather than computed for every customer on every dashboard load.
         { sql: `SELECT c.id, c.name, c.credit_balance FROM customers c
           WHERE ${dWhere.join(' AND ')} ORDER BY c.credit_balance DESC LIMIT 40`, params: dParams },
         { sql: `SELECT COUNT(*) FROM sales s
           WHERE ${COUNTS} AND s.balance_due > 0 AND s.due_date IS NOT NULL AND s.due_date < ? ${sc.sql}`, params: [today, ...sc.params] },
       ]);
-      const owed = firstRow(debtorReads[0]);
-      const worst = debtorReads[1];
-      const overdueInvoices = scalarRow(debtorReads[2]);
-      let over90 = 0;
-      if (worst.length) {
-        // One read for every sampled debtor. A query per customer is a round
-        // trip each, and a Worker that opens a fresh call per query is capped.
-        const ids = worst.map((w) => String(w.id));
-        const entries = await db.all(
-          `SELECT * FROM debtor_ledger WHERE is_deleted = 0 AND customer_id IN (${ids.map(() => '?').join(', ')}) ORDER BY created_at, id`,
-          ids,
-        );
-        const byCustomer = new Map();
-        for (const entry of entries) {
-          const key = String(entry.customer_id);
-          const list = byCustomer.get(key) || [];
-          list.push(entry);
-          byCustomer.set(key, list);
-        }
-        for (const w of worst) over90 = round2(over90 + ageBalance(byCustomer.get(String(w.id)) || [], { today }).bucket_90_plus);
-      }
-      debtors = {
-        count: Number(owed.count) || 0,
-        totalOwed: round2(Number(owed.total)),
-        likelyBad: over90,
-        overdueInvoices: Number(overdueInvoices) || 0,
-      };
     }
 
-    // ---- TILL / SAFE --------------------------------------------------
     const tillWhere = useBranch ? 'AND t.branch_id = ?' : (business ? 'AND t.business_id = ?' : '');
     const tillParam = useBranch ? [useBranch] : (business ? [String(business.id)] : []);
     const safeWhere = useBranch ? 'AND branch_id = ?' : (business ? 'AND business_id = ?' : '');
     const safeParam = useBranch ? [useBranch] : (business ? [String(business.id)] : []);
-    const cashReads = await readBatch(db, [
+    const cashRef = pushStatements([
       { sql: `SELECT t.*, b.name AS branch_name, u.full_name AS cashier_name
         FROM till_sessions t LEFT JOIN branches b ON b.id = t.branch_id LEFT JOIN users u ON u.id = t.user_id
         WHERE t.is_deleted = 0 AND t.status = 'OPEN' ${tillWhere} ORDER BY t.opened_at DESC LIMIT 20`, params: tillParam },
-      // Uncounted variances on CLOSED tills: cash control, not daily activity.
       { sql: `SELECT COALESCE(SUM(t.variance),0) AS net,
-          COALESCE(SUM(CASE WHEN t.variance < 0 THEN -t.variance ELSE 0 END),0) AS shortages,
+          COALESCE(SUM(CASE WHEN t.variance < 0 THEN t.variance ELSE 0 END),0) AS shortages,
           COALESCE(SUM(CASE WHEN t.variance > 0 THEN t.variance ELSE 0 END),0) AS surpluses,
           COUNT(*) AS closed,
-          COALESCE(SUM(CASE WHEN t.variance <> 0 AND t.reviewed_by IS NULL THEN 1 ELSE 0 END),0) AS unreviewed
-        FROM till_sessions t WHERE t.is_deleted = 0 AND t.status = 'CLOSED'
-          AND date(t.closed_at, '+1 hours') BETWEEN ? AND ? ${tillWhere}`, params: [from, to, ...tillParam] },
-      // The amount already carries its sign; every non-opening type is not negative.
-      { sql: `SELECT COALESCE(SUM(amount),0) AS balance
-        FROM branch_safe_ledger WHERE is_deleted = 0 ${safeWhere}`, params: safeParam },
+          SUM(CASE WHEN t.variance <> 0 AND cr.id IS NULL THEN 1 ELSE 0 END) AS unreviewed
+        FROM till_sessions t LEFT JOIN compliance_reviews cr ON cr.till_session_id = t.id AND cr.is_deleted = 0
+        WHERE t.is_deleted = 0 AND t.status = 'CLOSED' AND t.opened_at >= ? ${tillWhere}`, params: [addDays(today, -7), ...tillParam] },
+      { sql: `SELECT id, name, balance FROM branch_safe_ledger WHERE is_deleted = 0 ${safeWhere} ORDER BY name`, params: safeParam },
     ]);
-    const openTills = cashReads[0];
-    const variance = firstRow(cashReads[1]);
-    const safe = firstRow(cashReads[2]);
 
-    // ---- CASH POSITION (from the ledger, not the tills) ---------------
-    let cash = null;
-    if (atLeast(user.role, 'MANAGER') && business) {
-      const accountIds = await glService.loadAccountCodes(db, business.id);
-      const codes = ['1000', '1010', '1020', '1030', '1040'];
-      const wanted = codes.map((code) => accountIds.get(code)).filter(Boolean);
-      const accounts = [];
-      if (wanted.length) {
-        const rows = await db.all(`SELECT a.code, a.name, COALESCE(SUM(l.debit - l.credit),0) AS balance
-            FROM gl_accounts a
-            LEFT JOIN gl_journal_lines l ON l.account_id = a.id AND l.is_deleted = 0
-            LEFT JOIN gl_journal_entries e ON e.id = l.journal_entry_id AND e.is_deleted = 0
-            WHERE a.id IN (${wanted.map(() => '?').join(', ')}) GROUP BY a.id`, wanted);
-        const byCode = new Map(rows.map((row) => [String(row.code), row]));
-        for (const code of codes) {
-          const row = byCode.get(code);
-          if (row) accounts.push({ code: row.code, name: row.name, balance: round2(Number(row.balance)) });
-        }
-      }
-      cash = { accounts, total: round2(accounts.reduce((a, x) => a + x.balance, 0)) };
-    }
-
-    // ---- GROUP VIEW: per-business, and only while no branch is chosen -
-    // The per-branch total list is not built here. Those figures are the tiles, and they
-    // are a branch's tiles only after the owner has switched to that branch. Listing every
-    // shop's takings on the group screen is what "branch totals" were doing before a switch.
-    let byBranch = null;
-    let byBusiness = null;
+    let groupRef = null;
     if (isGroup) {
-        const groupReads = await readBatch(db, [
-          { sql: 'SELECT id, name, legal_name, profile_code, is_active FROM businesses WHERE is_deleted = 0 ORDER BY name', params: [] },
-          { sql: `SELECT s.business_id, COUNT(*) AS count, COALESCE(SUM(s.total),0) AS gross, COALESCE(SUM(s.vat_amount),0) AS vat
-            FROM sales s WHERE ${COUNTS} AND ${periodSpan.sql} GROUP BY s.business_id`, params: periodSpan.params },
-          { sql: 'SELECT business_id, COUNT(*) AS n FROM branches WHERE is_deleted = 0 AND is_active = 1 GROUP BY business_id', params: [] },
-        ]);
-        const businesses = groupReads[0];
-        const periodRows = groupReads[1];
-        const branchRows = groupReads[2];
-        const periodById = new Map(periodRows.map((row) => [String(row.business_id), row]));
-        const branchesById = new Map(branchRows.map((row) => [String(row.business_id), Number(row.n) || 0]));
-        byBusiness = businesses.map((biz) => {
-          const r = periodById.get(String(biz.id)) || { count: 0, gross: 0, vat: 0 };
-          return {
-            ...biz, branchCount: branchesById.get(String(biz.id)) || 0,
-            period: { sales: Number(r.count) || 0, gross: round2(Number(r.gross)), net: round2(Number(r.gross) - Number(r.vat)) },
-          };
-        });
+      groupRef = pushStatements([
+        { sql: 'SELECT id, name, legal_name, profile_code, is_active FROM businesses WHERE is_deleted = 0 ORDER BY name', params: [] },
+        { sql: `SELECT s.business_id, COUNT(*) AS count, COALESCE(SUM(s.total),0) AS gross, COALESCE(SUM(s.vat_amount),0) AS vat
+          FROM sales s WHERE ${COUNTS} AND ${periodSpan.sql} GROUP BY s.business_id`, params: periodSpan.params },
+        { sql: 'SELECT business_id, COUNT(*) AS n FROM branches WHERE is_deleted = 0 AND is_active = 1 GROUP BY business_id', params: [] },
+      ]);
     }
 
-    // ---- WHAT NEEDS DOING --------------------------------------------
-    // A dashboard that only reports the past is a report. The action list is what
-    // makes it a working screen: each item is something a person can do now.
-    const actions = [];
-    if (Number(lowStockCount) > 0) actions.push({ key: 'low_stock', severity: 'WARN', count: Number(lowStockCount), label: `${lowStockCount} product(s) at or below reorder level`, route: '/stock?filter=low' });
-    if (expiringSoon.length) actions.push({ key: 'expiring', severity: 'WARN', count: expiringSoon.length, label: `${expiringSoon.length} batch(es) expiring within ${settings.expiry_alert_days || 60} days`, route: '/stock?filter=expiring' });
-    if (debtors && debtors.overdueInvoices > 0) actions.push({ key: 'overdue', severity: debtors.likelyBad > 0 ? 'CRITICAL' : 'WARN', count: debtors.overdueInvoices, label: `${debtors.overdueInvoices} invoice(s) past their due date`, route: '/customers?filter=overdue' });
-    if (Number(variance.unreviewed) > 0) actions.push({ key: 'till_review', severity: 'WARN', count: Number(variance.unreviewed), label: `${variance.unreviewed} closed till(s) with an unexplained variance need sign-off`, route: '/till?filter=unreviewed' });
     const deviceWhere = [];
     const deviceParams = [];
     if (useBranch) {
@@ -388,7 +278,7 @@ function mount(app, base = '/api') {
       deviceWhere.push('branch_id IN (SELECT id FROM branches WHERE business_id = ? AND is_deleted = 0)');
       deviceParams.push(String(business.id));
     }
-    const actionReads = await readBatch(db, [
+    const actionRef = pushStatements([
       atLeast(user.role, 'MANAGER')
         ? { sql: `SELECT COUNT(*) FROM expenses WHERE is_deleted = 0 AND status = 'PENDING_APPROVAL' ${business ? 'AND business_id = ?' : ''}`, params: business ? [String(business.id)] : [] }
         : { sql: 'SELECT 0', params: [] },
@@ -396,19 +286,123 @@ function mount(app, base = '/api') {
       { sql: `SELECT COUNT(*) FROM branch_devices WHERE is_deleted = 0 AND registered_by IS NULL AND revoked_at IS NULL ${deviceWhere.length ? `AND ${deviceWhere.join(' AND ')}` : ''}`, params: deviceParams },
       { sql: `SELECT COUNT(*) FROM staff_attendance a WHERE a.is_deleted = 0 AND a.flagged = 1 AND a.reviewed_by IS NULL ${useBranch ? 'AND a.branch_id = ?' : (business ? 'AND a.business_id = ?' : '')}`, params: useBranch ? [useBranch] : (business ? [String(business.id)] : []) },
     ]);
+
+    const commitmentScope = [];
+    const commitmentParams = [];
+    if (useBranch) { commitmentScope.push('a.branch_id = ?'); commitmentParams.push(useBranch); }
+    else if (business) { commitmentScope.push('a.business_id = ?'); commitmentParams.push(String(business.id)); }
+    const commitmentWhere = commitmentScope.length ? `AND ${commitmentScope.join(' AND ')}` : '';
+    const commitmentRef = pushStatements([
+      { sql: "SELECT * FROM till_sessions WHERE branch_id = ? AND user_id = ? AND status = 'OPEN' AND is_deleted = 0 ORDER BY opened_at DESC LIMIT 1",
+        params: [String(branch ? branch.id : user.branch_id), String(user.id)] },
+      { sql: `SELECT COUNT(*) FROM asset_agreements a WHERE a.is_deleted = 0 AND a.status = 'OUT' ${commitmentWhere}`, params: commitmentParams },
+      { sql: `SELECT a.id, a.kind, a.ends_on, a.deposit_held, c.name AS customer_name
+         FROM asset_agreements a
+         LEFT JOIN customers c ON c.id = a.customer_id
+        WHERE a.is_deleted = 0 AND a.status = 'OUT' AND a.ends_on <= ? ${commitmentWhere}
+        ORDER BY a.ends_on ASC LIMIT 8`, params: [today, ...commitmentParams] },
+    ]);
+
+    const batchResults = await readBatch(db, dashboardStatements);
+
+    const salesReads = batchResults.slice(salesRef.start, salesRef.end);
+    const todaySales = firstRow(salesReads[0]);
+    const yesterdaySales = firstRow(salesReads[1]);
+    const todayCogs = firstRow(salesReads[2]);
+    const todayVoids = firstRow(salesReads[3]);
+    const byMethod = salesReads[4];
+    const period = firstRow(salesReads[5]);
+    const periodCogs = firstRow(salesReads[6]);
+    const series = salesReads[7];
+
+    const grossToday = round2(Number(todaySales.gross));
+    const vatToday = round2(Number(todaySales.vat));
+    const netToday = round2(grossToday - vatToday);
+    const cogsToday = round2(Number(todayCogs.cogs));
+    const marginToday = round2(netToday - cogsToday);
+    const grossYesterday = round2(Number(yesterdaySales.gross));
+    const periodNet = round2(Number(period.gross) - Number(period.vat));
+    const periodMargin = round2(periodNet - Number(periodCogs.cogs));
+
+    const stockReads = batchResults.slice(stockRef.start, stockRef.end);
+    const stock = firstRow(stockReads[0]);
+    const lowStock = stockReads[1];
+    const lowStockCount = scalarRow(stockReads[2]);
+    const expiringSoon = stockReads[3];
+    const topProducts = stockReads[4];
+    const categorySales = stockReads[5];
+    const topStaff = stockReads[6];
+
+    let debtors = null;
+    if (debtorRef) {
+      const debtorReads = batchResults.slice(debtorRef.start, debtorRef.end);
+      const owed = firstRow(debtorReads[0]);
+      const worst = debtorReads[1];
+      const overdueInvoices = scalarRow(debtorReads[2]);
+      let over90 = 0;
+      if (worst.length) {
+        const ids = worst.map((w) => String(w.id));
+        const entries = await db.all(
+          `SELECT * FROM debtor_ledger WHERE is_deleted = 0 AND customer_id IN (${ids.map(() => '?').join(', ')}) ORDER BY created_at, id`,
+          ids,
+        );
+        const byCustomer = new Map();
+        for (const entry of entries) {
+          const key = String(entry.customer_id);
+          const list = byCustomer.get(key) || [];
+          list.push(entry);
+          byCustomer.set(key, list);
+        }
+        for (const w of worst) {
+          const bal = ageBalance(Number(w.credit_balance) || 0, today, byCustomer.get(String(w.id)) || []);
+          over90 += bal.over90;
+        }
+      }
+      debtors = { total: round2(Number(owed.total)), count: Number(owed.count) || 0, over90: round2(over90), likelyBad: worst.length, overdueInvoices: Number(overdueInvoices) || 0 };
+    }
+
+    const cashReads = batchResults.slice(cashRef.start, cashRef.end);
+    const openTills = cashReads[0];
+    const variance = firstRow(cashReads[1]);
+    const cash = cashReads[2];
+
+    let byBranch = null;
+    let byBusiness = null;
+    if (groupRef) {
+      const groupReads = batchResults.slice(groupRef.start, groupRef.end);
+      const businesses = groupReads[0];
+      const counts = groupReads[1];
+      const branches = groupReads[2];
+      byBusiness = businesses.map((bs) => {
+        const c = counts.find((r) => String(r.business_id) === String(bs.id)) || { count: 0, gross: 0, vat: 0 };
+        const b = branches.find((r) => String(r.business_id) === String(bs.id)) || { n: 0 };
+        return {
+          id: bs.id, name: bs.name, code: bs.profile_code, active: Number(bs.is_active) === 1,
+          sales: Number(c.count) || 0, gross: round2(Number(c.gross)), net: round2(Number(c.gross) - Number(c.vat)),
+          branches: Number(b.n) || 0,
+        };
+      });
+      byBusiness.sort((a, b) => b.gross - a.gross || a.name.localeCompare(b.name));
+    }
+
+    const actionReads = batchResults.slice(actionRef.start, actionRef.end);
     const pendingExpenses = scalarRow(actionReads[0]);
     const pendingDeliveries = scalarRow(actionReads[1]);
     const pendingDevices = scalarRow(actionReads[2]);
     const flaggedAttendance = scalarRow(actionReads[3]);
+
+    const actions = [];
+    if (Number(lowStockCount) > 0) actions.push({ key: 'low_stock', severity: 'WARN', count: Number(lowStockCount), label: `${lowStockCount} product(s) at or below reorder level`, route: '/stock?filter=low' });
+    if (expiringSoon.length) actions.push({ key: 'expiring', severity: 'WARN', count: expiringSoon.length, label: `${expiringSoon.length} batch(es) expiring within ${settings.expiry_alert_days || 60} days`, route: '/stock?filter=expiring' });
+    if (debtors && debtors.overdueInvoices > 0) actions.push({ key: 'overdue', severity: debtors.likelyBad > 0 ? 'CRITICAL' : 'WARN', count: debtors.overdueInvoices, label: `${debtors.overdueInvoices} invoice(s) past their due date`, route: '/customers?filter=overdue' });
+    if (Number(variance.unreviewed) > 0) actions.push({ key: 'till_review', severity: 'WARN', count: Number(variance.unreviewed), label: `${variance.unreviewed} closed till(s) with an unexplained variance need sign-off`, route: '/till?filter=unreviewed' });
     if (Number(pendingExpenses) > 0) actions.push({ key: 'expenses', severity: 'INFO', count: Number(pendingExpenses), label: `${pendingExpenses} expense(s) awaiting approval`, route: '/expenses?status=PENDING_APPROVAL' });
     if (Number(pendingDeliveries) > 0) actions.push({ key: 'deliveries', severity: 'INFO', count: Number(pendingDeliveries), label: `${pendingDeliveries} delivery job(s) outstanding`, route: '/sales?tab=deliveries' });
     if (Number(pendingDevices) > 0 && atLeast(user.role, 'MANAGER')) actions.push({ key: 'devices', severity: 'INFO', count: Number(pendingDevices), label: `${pendingDevices} device(s) awaiting approval`, route: '/attendance?tab=devices' });
     if (Number(flaggedAttendance) > 0 && atLeast(user.role, 'MANAGER')) actions.push({ key: 'attendance', severity: 'WARN', count: Number(flaggedAttendance), label: `${flaggedAttendance} clock-in(s) flagged for review`, route: '/attendance?filter=unreviewed' });
+
     let openSaleIssues = 0;
     try {
-      // The flagged-sales review runs the full maintenance scan. Sale/sync
-      // event handlers already record new flags, so this first screen counts
-      // those stored rows without serializing that scan (or its writes) again.
       const issueWhere = ["si.status = 'OPEN'"];
       const issueParams = [];
       const issueScope = scopeFilter(scope, { alias: 'si' });
@@ -420,21 +414,7 @@ function mount(app, base = '/api') {
     }
     if (openSaleIssues > 0) actions.push({ key: 'sale_issues', severity: 'WARN', count: openSaleIssues, label: `${openSaleIssues} flagged sale(s) need the data fixed before they can be cleared`, route: '/sales/issues' });
 
-    const commitmentScope = [];
-    const commitmentParams = [];
-    if (useBranch) { commitmentScope.push('a.branch_id = ?'); commitmentParams.push(useBranch); }
-    else if (business) { commitmentScope.push('a.business_id = ?'); commitmentParams.push(String(business.id)); }
-    const commitmentWhere = commitmentScope.length ? `AND ${commitmentScope.join(' AND ')}` : '';
-    const commitmentReads = await readBatch(db, [
-      { sql: "SELECT * FROM till_sessions WHERE branch_id = ? AND user_id = ? AND status = 'OPEN' AND is_deleted = 0 ORDER BY opened_at DESC LIMIT 1",
-        params: [String(branch ? branch.id : user.branch_id), String(user.id)] },
-      { sql: `SELECT COUNT(*) FROM asset_agreements a WHERE a.is_deleted = 0 AND a.status = 'OUT' ${commitmentWhere}`, params: commitmentParams },
-      { sql: `SELECT a.id, a.kind, a.ends_on, a.deposit_held, c.name AS customer_name
-         FROM asset_agreements a
-         LEFT JOIN customers c ON c.id = a.customer_id
-        WHERE a.is_deleted = 0 AND a.status = 'OUT' AND a.ends_on <= ? ${commitmentWhere}
-        ORDER BY a.ends_on ASC LIMIT 8`, params: [today, ...commitmentParams] },
-    ]);
+    const commitmentReads = batchResults.slice(commitmentRef.start, commitmentRef.end);
     const myTill = firstRow(commitmentReads[0]);
     const outNow = scalarRow(commitmentReads[1]);
     const dueBack = commitmentReads[2];

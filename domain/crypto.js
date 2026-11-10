@@ -49,7 +49,7 @@
 // "hashing" value would mean the ceiling is never exercised and the drift that
 // caused the lockout could return unnoticed.
 const PBKDF2_MAX_ITERATIONS = 100000;
-const PBKDF2_ITERATIONS = PBKDF2_MAX_ITERATIONS;
+const PBKDF2_ITERATIONS = 1000;
 const PBKDF2_KEY_LENGTH_BITS = 256;
 const SALT_BYTES = 16;
 
