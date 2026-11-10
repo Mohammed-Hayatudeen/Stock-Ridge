@@ -758,9 +758,11 @@ function mount(app, base = '/api') {
       for (const piece of shelf.where) where.push(piece);
       params.push(...shelf.params);
       if (spec.onStock && stockGate && stockGate.any) {
+        const user = ctx.get('user');
         const column = table === 'products' ? 'id' : 'product_id';
-        where.push(`${column} IN (SELECT product_id FROM stock_batches WHERE ${stockGate.held.where.join(' AND ')})`);
-        params.push(...stockGate.held.params);
+        const userScope = table === 'products' ? 'created_by = ?' : 'product_id IN (SELECT id FROM products WHERE created_by = ?)';
+        where.push(`(${column} IN (SELECT product_id FROM stock_batches WHERE ${stockGate.held.where.join(' AND ')}) OR ${userScope})`);
+        params.push(...stockGate.held.params, String(user.id));
       }
       const afterRaw = paging ? afterMap[table] : null;
       const afterId = afterRaw == null ? '' : String(afterRaw).trim();
@@ -1114,13 +1116,13 @@ const PULLABLE = {
   // for a search. It is not the shelf, and a till must not save those 4,828 names.
   // onStock: the Greenbook and the shop catalogue stay on the server. A till
   // saves a product only when a batch of it is on hand.
-  products: { businessScoped: true, branchScoped: false, orderBy: 'name', shopShelf: true },
-  product_units: { businessScoped: false, branchScoped: false, orderBy: 'quantity_in_base', viaProduct: true },
-  product_variants: { businessScoped: false, branchScoped: false, orderBy: 'name', viaProduct: true },
-  product_barcodes: { businessScoped: false, branchScoped: false, orderBy: 'barcode', viaProduct: true },
+  products: { businessScoped: true, branchScoped: false, orderBy: 'name', shopShelf: true, onStock: true },
+  product_units: { businessScoped: false, branchScoped: false, orderBy: 'quantity_in_base', viaProduct: true, onStock: true },
+  product_variants: { businessScoped: false, branchScoped: false, orderBy: 'name', viaProduct: true, onStock: true },
+  product_barcodes: { businessScoped: false, branchScoped: false, orderBy: 'barcode', viaProduct: true, onStock: true },
   price_lists: { businessScoped: true, branchScoped: false, orderBy: 'priority, name' },
-  price_list_items: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true },
-  product_price_overrides: { businessScoped: false, branchScoped: true, orderBy: 'product_id' },
+  price_list_items: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true, onStock: true },
+  product_price_overrides: { businessScoped: false, branchScoped: true, orderBy: 'product_id', onStock: true },
   suppliers: { businessScoped: true, branchScoped: false, orderBy: 'name' },
   stock_batches: { businessScoped: true, branchScoped: true, orderBy: 'product_id, batch_no' },
   branch_compliance_records: { businessScoped: false, branchScoped: true, orderBy: 'record_type' },

@@ -330,10 +330,15 @@
   async function dropCatalogueNotOnStock() {
     if (!SR.store || !SR.store.remove) return 0;
     const ids = await stockedIds();
+    const userId = SR.state && SR.state.user ? String(SR.state.user.id) : null;
     let removed = 0;
     const products = await SR.store.all('products').catch(() => []);
     for (const row of products || []) {
       if (!row || row.id == null || ids.has(String(row.id))) continue;
+      if (userId && String(row.created_by) === userId) {
+        ids.add(String(row.id));
+        continue;
+      }
       await SR.store.remove('products', row.id);
       removed += 1;
     }
