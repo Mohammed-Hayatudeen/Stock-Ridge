@@ -186,8 +186,8 @@ public class MainActivity extends Activity {
             try {
                 conn = (HttpURLConnection) new URL(uri.toString()).openConnection();
                 conn.setInstanceFollowRedirects(true);
-                conn.setConnectTimeout(4000);
-                conn.setReadTimeout(20000);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(180000);
                 conn.setRequestProperty("User-Agent", CHROME_UA);
                 conn.setRequestProperty("Accept", main ? "text/html,application/xhtml+xml" : "*/*");
                 int status = conn.getResponseCode();
