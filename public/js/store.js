@@ -167,6 +167,30 @@
     return rows.find(predicate) || null;
   }
 
+  async function changedOnly(table, rows) {
+    if (!rows || !rows.length) return [];
+    const db = await open();
+    const tx = db.transaction(STORE_ROWS, 'readonly');
+    const store = tx.objectStore(STORE_ROWS);
+    const checks = rows.map((row) => {
+      if (!row || row.id == null) return Promise.resolve(null);
+      const next = row.updated_at == null || row.updated_at === '' ? null : String(row.updated_at);
+      if (!next) return Promise.resolve(row);
+      return new Promise((resolve) => {
+        const req = store.get([table, String(row.id)]);
+        req.onsuccess = () => {
+          const hit = req.result;
+          const local = hit ? hit.row : null;
+          const prev = local && local.updated_at != null && local.updated_at !== '' ? String(local.updated_at) : null;
+          resolve(prev !== next ? row : null);
+        };
+        req.onerror = () => resolve(row);
+      });
+    });
+    const results = await Promise.all(checks);
+    return results.filter(Boolean);
+  }
+
   async function get(table, id) {
     const db = await open();
     const hit = await reqAsync(db.transaction(STORE_ROWS, 'readonly').objectStore(STORE_ROWS).get([table, String(id)]));
@@ -548,6 +572,7 @@
   SR.store = {
     DB_NAME, DB_VERSION, OUTBOX_CAP,
     open, tx,
+    changedOnly,
     putMany, all, first, get, remove, rememberShopPrice, clearTable, clearAll, tableStats,
     stockOnHand, receivedOnHand,
     saveLocalClaim, localClaims, findLocalClaim,

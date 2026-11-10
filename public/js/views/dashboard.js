@@ -693,7 +693,7 @@
     }
 
     void render; // initial paint happens here
-    await refresh();
+    refresh().catch(err => { body.replaceChildren(ui.errorBlock(err, { retry: { label: "Try again", run: refresh } })); });
     return wrap;
   }
 
