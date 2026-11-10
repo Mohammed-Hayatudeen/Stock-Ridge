@@ -131,6 +131,7 @@ function mount(app, base = '/api') {
     const todaySpan = soldSpan(today);
     const yesterdaySpan = soldSpan(yesterday);
     const periodSpan = soldSpan(today);
+    const sc = scopeClause('s');
 
     const dashboardStatements = [];
     const pushStatements = (stmts) => {

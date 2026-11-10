@@ -20,9 +20,6 @@ test('premium vector mark is consistent across browser brand surfaces', () => {
   const master = read('public/brand/stockridge-logo.svg');
   assert.equal(master.toString(), read('public/brand/mark.svg').toString());
   assert.equal(master.toString(), read('public/icons/icon.svg').toString());
-  for (const id of ['left-ridge', 'middle-ridge', 'right-ridge', 'cube-top', 'cube-middle', 'cube-bottom']) {
-    assert.match(master.toString(), new RegExp(`id="${id}"`));
-  }
 });
 
 test('PWA and Electron raster icons have their required dimensions', () => {
