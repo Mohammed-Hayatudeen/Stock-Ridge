@@ -1114,13 +1114,13 @@ const PULLABLE = {
   // for a search. It is not the shelf, and a till must not save those 4,828 names.
   // onStock: the Greenbook and the shop catalogue stay on the server. A till
   // saves a product only when a batch of it is on hand.
-  products: { businessScoped: true, branchScoped: false, orderBy: 'name', shopShelf: true, onStock: true },
-  product_units: { businessScoped: false, branchScoped: false, orderBy: 'quantity_in_base', viaProduct: true, onStock: true },
-  product_variants: { businessScoped: false, branchScoped: false, orderBy: 'name', viaProduct: true, onStock: true },
-  product_barcodes: { businessScoped: false, branchScoped: false, orderBy: 'barcode', viaProduct: true, onStock: true },
+  products: { businessScoped: true, branchScoped: false, orderBy: 'name', shopShelf: true },
+  product_units: { businessScoped: false, branchScoped: false, orderBy: 'quantity_in_base', viaProduct: true },
+  product_variants: { businessScoped: false, branchScoped: false, orderBy: 'name', viaProduct: true },
+  product_barcodes: { businessScoped: false, branchScoped: false, orderBy: 'barcode', viaProduct: true },
   price_lists: { businessScoped: true, branchScoped: false, orderBy: 'priority, name' },
-  price_list_items: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true, onStock: true },
-  product_price_overrides: { businessScoped: false, branchScoped: true, orderBy: 'product_id', onStock: true },
+  price_list_items: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true },
+  product_price_overrides: { businessScoped: false, branchScoped: true, orderBy: 'product_id' },
   suppliers: { businessScoped: true, branchScoped: false, orderBy: 'name' },
   stock_batches: { businessScoped: true, branchScoped: true, orderBy: 'product_id, batch_no' },
   branch_compliance_records: { businessScoped: false, branchScoped: true, orderBy: 'record_type' },
@@ -1138,7 +1138,7 @@ const PULLABLE = {
   // once the line dropped. These rows are the same tables Turso holds.
   // Child rows have no business column of their own, so they are limited
   // through the parent. Secrets and the ledger stay off the device.
-  product_measures: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true, onStock: true },
+  product_measures: { businessScoped: false, branchScoped: false, orderBy: 'product_id', viaProduct: true },
   purchase_order_items: { businessScoped: false, branchScoped: false, orderBy: 'updated_at', parent: { table: 'purchase_orders', column: 'purchase_order_id' } },
   sales: { businessScoped: true, branchScoped: true, orderBy: 'sold_at' },
   sale_items: { businessScoped: false, branchScoped: false, orderBy: 'updated_at', parent: { table: 'sales', column: 'sale_id' } },

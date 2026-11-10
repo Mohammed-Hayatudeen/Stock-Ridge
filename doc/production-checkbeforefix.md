@@ -98,3 +98,14 @@
 - **Changes Applied:**
   - Verified and documented that the requested stack optimizations form the exact foundation of the current Stock-Ridge architecture, especially following the rigorous R034-R042 patching phases.
 - **Verification Log:** Codebase conceptually audited. Architecture is fundamentally sound and optimally aligned with local-first, batched-network principles.
+
+### R044: True Offline-First Sync & Misunderstood Sync Limits
+- **Date:** 2026-11-10
+- **Prompt Link:** User reported "why is it 0 of 20 I want it to be an offline first so the limit should be like 200 or 2000 The shop has no goods yet...".
+- **Analysis & Root Cause:** 
+  - **"0 of 20":** The user created 20 products in the cloud, but the till showed "0 of 20" and the message "The shop has no goods yet". The user misinterpreted `20` as a hard system limit and requested an increase to 200 or 2000. `20` was actually the exact total of the products they had created.
+  - **The Missing 20 Products:** The sync engine was configured with `onStock: true` for the product catalog. This meant a till would *only* download a product if it currently had physical inventory (`stock_batches`) on hand. Because the 20 products had zero stock, they were skipped, making the till think the catalog was empty.
+- **Changes Applied:**
+  - Removed `onStock: true` from `products`, `product_units`, `product_variants`, `product_barcodes`, `price_list_items`, and `product_price_overrides` in `server/routes/sync.js`. This enforces a true offline-first model: the till will now download the *entire* shop catalog (whether it has stock or not), scaling infinitely whether they have 20, 2,000, or 20,000 products.
+  - Adjusted `public/js/views/sync.js` to only display the "X of Y" fraction when `visibleProducts` is less than `shopProductCount`. When fully synced, it will now simply say "20 products" (or "2000 products"), preventing users from confusing their total product count with a hard limit.
+- **Verification Log:** Node test suite passed. Synced logic evaluated to ensure shared market goods are still properly filtered by `shopShelf: true`.

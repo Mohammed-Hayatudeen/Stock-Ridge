@@ -103,9 +103,9 @@
       const report = SR.saveStatus.decide(facts);
       const when = facts.lastPullAt ? String(facts.lastPullAt).replace('T', ' ').slice(0, 16) : 'not yet';
       const copyLabel = report.finished ? 'Catalogue saved' : 'Last copy';
-      const productLine = facts.shopProductCount
+      const productLine = facts.shopProductCount && facts.visibleProducts < facts.shopProductCount
         ? facts.visibleProducts + ' of ' + facts.shopProductCount + ' products'
-        : facts.productRows + ' products';
+        : facts.visibleProducts + ' products';
       document.querySelectorAll('[id="save-status-card"]').forEach((el) => el.remove());
       host.prepend(ui.h('section', {
         id: 'save-status-card',
