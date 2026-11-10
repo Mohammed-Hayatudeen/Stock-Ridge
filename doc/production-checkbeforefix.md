@@ -37,3 +37,17 @@
   - A solitary, batched `readBatch(db, dashboardStatements)` is executed against the DB in exactly 1 RTT, slicing the results out synchronously. This collapses 8 remote backend round-trips into 1, instantly resolving backend dashboard latency.
   - Verified `new-logo.svg` is completely deployed across `icon.svg` and `mark.svg` with pure `#000` gradients.
 - **Verification Log:** Dashboard syntax checked and route visually audited.
+
+### R039: Sync Fallback Patch & App Icon Branding Update
+- **Date:** 2026-11-10
+- **Prompt Link:** User reported identical test results (15s login, 15s dashboard, 75s sync) and Android showing old branding. They also requested the yellow line removed from the black cube logo.
+- **Analysis & Root Cause:** 
+  - **Identical Metrics (75s/15s):** The user was testing against the remote Cloudflare Worker backend, but all of my previous critical backend API optimizations (R037, R038) had only been committed to Git. The user never executed `npm run worker:deploy`, meaning the remote backend handling the Android/Electron requests was still the slow, unoptimized, legacy version. 
+  - **Android Old Branding:** Android's build process generates launcher icons from `mipmap` PNG files which were previously untouched, so they retained the old logos. Additionally, because the live backend had not been deployed, the webview inside Android kept downloading the old website assets (`logo.jpg`).
+  - **Electron Sync Filter Bug:** A local bug was identified in the `shop-clone.js` fast filtering path where newly initialized tables lacking `updated_at` threw an unhandled SQL exception. The IPC bridge rejected, causing the app to fallback to writing all rows sequentially instead of filtering.
+- **Changes Applied:**
+  - Removed the gold Hizam band from the Kaaba block across all SVGs.
+  - Using `@resvg/resvg-js`, rendered the new `icon.svg` into updated Android PNG launcher icons for `mdpi`, `hdpi`, `xhdpi`, `xxhdpi`, and `xxxhdpi` densities.
+  - Patched `lib/shop-clone.js` to correctly capture SQLite exceptions on missing tables during `changedOnly`, and upgraded `store-native.js` to process the client-side delta filter locally when running on Android.
+  - Verified the ONLY missing step preventing the 75s and 15s metrics from disappearing is that the user MUST execute `npm run worker:deploy`.
+- **Verification Log:** Node sync test confirmed delta filtering bypasses correctly. SVGs verified.
