@@ -82,7 +82,7 @@ const SHELL = [
   '/icons/icon-512.png?v=ridge-20261109-1609-eeb2d71',
   '/icons/icon-maskable-512.png?v=ridge-20261109-1609-eeb2d71',
   '/brand/mark.svg?v=ridge-20261109-1609-eeb2d71',
-  '/brand/logo.jpg?v=ridge-20261109-1609-eeb2d71',
+  '/brand/mark.svg?v=ridge-20261109-1609-eeb2d71',
   '/brand/mark.png?v=ridge-20261109-1609-eeb2d71',
   // THE OFFLINE FALLBACK IS PART OF THE SHELL, and it was not. The navigation
   // handler below used to build its own fallback as an inline HTML string, which

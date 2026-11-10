@@ -1,8 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
   <title id="title">StockRidge premium brand mark</title>
-  <desc id="description">A premium composition of emerald mountains rising behind a solid black structure proportional to the Kaaba.</desc>
+  <desc id="description">A premium composition of distinct emerald mountains rising behind a solid black structure proportional to the Kaaba.</desc>
   <defs>
-    <!-- Deep premium background -->
     <linearGradient id="backdrop" x1="72" y1="40" x2="440" y2="480" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0d2d20"/>
       <stop offset="0.55" stop-color="#071d14"/>
@@ -10,37 +9,36 @@
     </linearGradient>
 
     <!-- Mountain facets -->
-    <linearGradient id="mount-mid-left" x1="108" y1="236" x2="256" y2="236" gradientUnits="userSpaceOnUse">
+    <linearGradient id="mount-left-left" x1="60" y1="260" x2="150" y2="260" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#4ae390"/>
       <stop offset="1" stop-color="#24c06b"/>
     </linearGradient>
-    <linearGradient id="mount-mid-right" x1="256" y1="236" x2="404" y2="236" gradientUnits="userSpaceOnUse">
+    <linearGradient id="mount-left-right" x1="150" y1="260" x2="240" y2="260" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#168b47"/>
       <stop offset="1" stop-color="#0e6030"/>
     </linearGradient>
 
-    <linearGradient id="mount-left-left" x1="64" y1="260" x2="148" y2="260" gradientUnits="userSpaceOnUse">
+    <linearGradient id="mount-mid-left" x1="120" y1="200" x2="256" y2="200" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#2ecc71"/>
       <stop offset="1" stop-color="#27ae60"/>
     </linearGradient>
-    <linearGradient id="mount-left-right" x1="148" y1="260" x2="232" y2="260" gradientUnits="userSpaceOnUse">
+    <linearGradient id="mount-mid-right" x1="256" y1="200" x2="392" y2="200" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#147c3f"/>
       <stop offset="1" stop-color="#0c5128"/>
     </linearGradient>
 
-    <linearGradient id="mount-right-left" x1="280" y1="265" x2="366" y2="265" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#2ecc71"/>
-      <stop offset="1" stop-color="#27ae60"/>
+    <linearGradient id="mount-right-left" x1="270" y1="265" x2="360" y2="265" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4ae390"/>
+      <stop offset="1" stop-color="#24c06b"/>
     </linearGradient>
-    <linearGradient id="mount-right-right" x1="366" y1="265" x2="448" y2="265" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#147c3f"/>
-      <stop offset="1" stop-color="#0c5128"/>
+    <linearGradient id="mount-right-right" x1="360" y1="265" x2="450" y2="265" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#168b47"/>
+      <stop offset="1" stop-color="#0e6030"/>
     </linearGradient>
 
-    <!-- Kaaba Cube Gradient -->
     <linearGradient id="kaaba-front" x1="169" y1="176" x2="343" y2="376" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1a1a1a"/>
-      <stop offset="0.4" stop-color="#0d0d0d"/>
+      <stop offset="0" stop-color="#222222"/>
+      <stop offset="0.5" stop-color="#111111"/>
       <stop offset="1" stop-color="#000000"/>
     </linearGradient>
     
@@ -51,44 +49,47 @@
     </linearGradient>
   </defs>
 
-  <!-- Background -->
   <rect x="16" y="16" width="480" height="480" rx="104" fill="url(#backdrop)"/>
   <rect x="24" y="24" width="464" height="464" rx="96" fill="none" stroke="#b8e5ca" stroke-opacity="0.12" stroke-width="2"/>
 
-  <!-- Emerald Mountains -->
   <g id="ridges" stroke-linejoin="round">
-    <!-- Center Mountain (Tallest, in back) -->
-    <path d="M108 376 L256 96 L256 376 Z" fill="url(#mount-mid-left)"/>
-    <path d="M256 96 L404 376 L256 376 Z" fill="url(#mount-mid-right)"/>
-    
-    <!-- Left Mountain (Front) -->
-    <path d="M64 376 L148 160 L148 376 Z" fill="url(#mount-left-left)"/>
-    <path d="M148 160 L232 376 L148 376 Z" fill="url(#mount-left-right)"/>
 
-    <!-- Right Mountain (Front) -->
-    <path d="M280 376 L366 170 L366 376 Z" fill="url(#mount-right-left)"/>
-    <path d="M366 170 L448 376 L366 376 Z" fill="url(#mount-right-right)"/>
+    <!-- Mountain at 256 -->
+    <path d="M116.0 376 L256 116 L256 376 Z" fill="url(#mount-mid-left)"/>
+    <path d="M256 116 L396.0 376 L256 376 Z" fill="url(#mount-mid-right)"/>
+    <!-- Highlights -->
+    <path d="M116.0 376 L256 116 L396.0 376" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="1.5"/>
+    <path d="M256 116 L256 376" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="1.5"/>
 
-    <!-- Geometric highlighting lines for peaks -->
-    <path d="M108 376 L256 96 L404 376" fill="none" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1.5"/>
-    <path d="M256 96 L256 376" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="1.5"/>
-    <path d="M148 160 L148 376" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="1.5"/>
-    <path d="M366 170 L366 376" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="1.5"/>
+
+    <!-- Mountain at 150 -->
+    <path d="M60.0 376 L150 196 L150 376 Z" fill="url(#mount-left-left)"/>
+    <path d="M150 196 L240.0 376 L150 376 Z" fill="url(#mount-left-right)"/>
+    <!-- Highlights -->
+    <path d="M60.0 376 L150 196 L240.0 376" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="1.5"/>
+    <path d="M150 196 L150 376" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="1.5"/>
+
+
+    <!-- Mountain at 360 -->
+    <path d="M270.0 376 L360 216 L360 376 Z" fill="url(#mount-right-left)"/>
+    <path d="M360 216 L450.0 376 L360 376 Z" fill="url(#mount-right-right)"/>
+    <!-- Highlights -->
+    <path d="M270.0 376 L360 216 L450.0 376" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="1.5"/>
+    <path d="M360 216 L360 376" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="1.5"/>
+
   </g>
 
   <!-- Kaaba Cube -->
   <g id="kaaba-cube">
     <!-- Main Black Body -->
-    <rect x="169" y="176" width="174" height="200" fill="url(#kaaba-front)" stroke="#333333" stroke-opacity="0.6" stroke-width="1.5"/>
+    <rect x="169" y="176" width="174" height="200" fill="url(#kaaba-front)" stroke="#444" stroke-opacity="0.8" stroke-width="1.5"/>
     
-    <!-- Subtle Gold Band (Hizam) for elegant styling -->
+    <!-- Subtle Gold Band (Hizam) -->
     <rect x="169.75" y="214" width="172.5" height="12" fill="url(#gold-band)"/>
-    <!-- Bottom line of gold band -->
     <path d="M169.75 226 L342.25 226" fill="none" stroke="#c29a0c" stroke-width="1"/>
-    <!-- Top line of gold band -->
     <path d="M169.75 214 L342.25 214" fill="none" stroke="#ffeb99" stroke-width="1"/>
     
     <!-- Crisp Top Edge Highlight -->
-    <path d="M169.75 176.75 L342.25 176.75" fill="none" stroke="#444444" stroke-opacity="0.8" stroke-width="1.5"/>
+    <path d="M169.75 176.75 L342.25 176.75" fill="none" stroke="#555" stroke-opacity="0.9" stroke-width="1.5"/>
   </g>
 </svg>

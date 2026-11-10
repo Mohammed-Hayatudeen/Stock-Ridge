@@ -569,7 +569,7 @@
   function receiptLogoSrc() {
     const settings = (SR.state && SR.state.settings) || {};
     if (settings.logo_data_url) return settings.logo_data_url;
-    return SR.BUILD ? '/brand/logo.jpg?v=' + SR.BUILD : '/brand/logo.jpg';
+    return SR.BUILD ? '/brand/mark.svg?v=' + SR.BUILD : '/brand/mark.svg';
   }
 
   /** The receipt as a slip, not a wall of monospace. Print still uses the text. */
