@@ -127,6 +127,10 @@ function mount(app, base = '/api') {
     };
 
     // ---- TODAY --------------------------------------------------------
+    const yesterday = addDays(today, -1);
+    const todaySpan = soldSpan(today);
+    const yesterdaySpan = soldSpan(yesterday);
+    const periodSpan = soldSpan(today);
 
     const dashboardStatements = [];
     const pushStatements = (stmts) => {
