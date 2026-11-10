@@ -312,7 +312,7 @@
           offline: true,
           view: 'STAFF',
           today: { sales: saved.count, count: saved.count, gross: saved.gross, queued: outbox.pending, vsYesterday: null },
-          period: null,
+          period: { from: (SR.util && SR.util.nowWatSql ? String(SR.util.nowWatSql()) : new Date().toISOString()).slice(0, 10), to: (SR.util && SR.util.nowWatSql ? String(SR.util.nowWatSql()) : new Date().toISOString()).slice(0, 10), grossRevenue: 0, netRevenue: 0, sales: 0 },
           stock: { products: products.length, lowStockCount, atCost },
           debtors: { count: 0, totalOwed: 0, likelyBad: 0, overdueInvoices: 0 },
           cash: Object.assign({ safeBalance: await mirroredSafe(branchId) }, await mirroredDrawer(branchId)),
@@ -340,11 +340,14 @@
       }
       const outbox = await SR.sync.queueStats();
       const saved = localSales(outbox.items || []);
+      const today = (SR.util && SR.util.nowWatSql ? String(SR.util.nowWatSql()) : new Date().toISOString()).slice(0, 10);
+      const period = { from: today, to: today, grossRevenue: 0, netRevenue: 0, sales: 0 };
+
       return {
         offline: true,
         view: 'STAFF',
         today: { sales: saved.count, count: saved.count, gross: saved.gross, queued: outbox.pending, vsYesterday: null },
-        period: null,
+        period: { from: (SR.util && SR.util.nowWatSql ? String(SR.util.nowWatSql()) : new Date().toISOString()).slice(0, 10), to: (SR.util && SR.util.nowWatSql ? String(SR.util.nowWatSql()) : new Date().toISOString()).slice(0, 10), grossRevenue: 0, netRevenue: 0, sales: 0 },
         stock: { products: products.length, lowStockCount, atCost },
         debtors: { count: 0, totalOwed: 0, likelyBad: 0, overdueInvoices: 0 },
         cash: Object.assign({ safeBalance: await mirroredSafe(branchId) }, await mirroredDrawer(branchId)),
