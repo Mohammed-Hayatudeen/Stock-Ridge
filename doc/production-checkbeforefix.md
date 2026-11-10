@@ -109,3 +109,16 @@
   - Removed `onStock: true` from `products`, `product_units`, `product_variants`, `product_barcodes`, `price_list_items`, and `product_price_overrides` in `server/routes/sync.js`. This enforces a true offline-first model: the till will now download the *entire* shop catalog (whether it has stock or not), scaling infinitely whether they have 20, 2,000, or 20,000 products.
   - Adjusted `public/js/views/sync.js` to only display the "X of Y" fraction when `visibleProducts` is less than `shopProductCount`. When fully synced, it will now simply say "20 products" (or "2000 products"), preventing users from confusing their total product count with a hard limit.
 - **Verification Log:** Node test suite passed. Synced logic evaluated to ensure shared market goods are still properly filtered by `shopShelf: true`.
+
+### R045: Restore onStock limits while preserving unique user offline data
+- **Date:** 2026-11-10
+- **Prompt Link:** User requested returning `onStock` to preserve the minimum read/write policy and limit pull sizes, but insisted that "on the offline sql it should be every user should have his unique saved data so that the offline would be very helpfull and functional to the flow."
+- **Analysis & Root Cause:** 
+  - Removing `onStock` across the board caused the entire catalog to sync, heavily taxing bandwidth and violating the "minimal payload" design principle of the application.
+  - However, if `onStock: true` is strictly enforced, products with 0 stock (e.g., newly created products or services) are never synced to the device. This meant users couldn't see or interact with the products they literally *just created* via the web interface.
+  - Furthermore, the frontend (`public/js/sync.js`) actively executes a `dropCatalogueNotOnStock()` cleanup sweep. If a product arrives from the backend but has no stock, the frontend immediately deletes it from the local SQLite/IndexedDB offline store.
+- **Changes Applied:**
+  - Restored `onStock: true` to `products`, `product_units`, `product_variants`, `product_barcodes`, `price_list_items`, and `product_price_overrides` in `server/routes/sync.js`.
+  - Modified the backend `onStock` SQL logic to inject an `OR p.created_by = ?` user-scoped condition. This perfectly balances the requirement: the pull size is strictly limited to products that have stock, *plus* the unique saved data (products) created by the currently logged-in user.
+  - Modified `dropCatalogueNotOnStock()` in `public/js/sync.js` to check `row.created_by`. If the row was created by the currently active user (`SR.state.user.id`), it is specifically protected from the offline SQL purge sweep.
+- **Verification Log:** Node test suite passed. Sync limits verified to only pass stock and user-owned catalog data.
