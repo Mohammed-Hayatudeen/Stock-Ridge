@@ -116,7 +116,7 @@
         if (copyInFlight()) return;
         try { off(); } catch (e) { /* already removed */ }
         settleRetry = null;
-        refresh();
+        refresh(true);
       });
       settleRetry = off;
       if (ctx.onCleanup) ctx.onCleanup(() => {
@@ -126,8 +126,10 @@
       });
     }
 
-    async function refresh() {
-      body.replaceChildren(ui.loading('Reading the position…'));
+    async function refresh(silent = false) {
+      if (silent !== true) {
+        body.replaceChildren(ui.loading('Reading the position…'));
+      }
       let data = null; let offline = false; let catchingUp = false; let error = null;
       let changeOwed = null;
       try {
