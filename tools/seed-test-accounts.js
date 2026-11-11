@@ -4,10 +4,17 @@ const path = require('path');
 const crypto = require('crypto');
 const { createTursoDatabase } = require('../worker/src/turso');
 
+function bytesToBase64url(bytes) {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = '';
+  for (let i = 0; i < arr.length; i += 1) binary += String.fromCharCode(arr[i]);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 function hashPin(pin) {
-  const salt = crypto.randomBytes(16).toString('hex');
+  const salt = crypto.randomBytes(16);
   const derived = crypto.pbkdf2Sync(String(pin), salt, 1000, 32, 'sha256');
-  return `pbkdf2.1000.${salt}.${derived.toString('hex')}`;
+  return `pbkdf2$sha256$1000$${bytesToBase64url(salt)}$${derived.toString('hex')}`;
 }
 
 function loadEnvFile() {
