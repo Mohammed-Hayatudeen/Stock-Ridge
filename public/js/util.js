@@ -384,6 +384,30 @@
     return `${(v / 1048576).toFixed(1)} MB`;
   }
 
+
+  const SELLING_GROUPS = [
+    { code: 'PHARMACEUTICALS', label: 'Pharmaceuticals' },
+    { code: 'NON_PHARMACEUTICALS', label: 'Others' }
+  ];
+
+  function sellingGroups() {
+    return SELLING_GROUPS;
+  }
+
+  function sellingGroup(row) {
+    if (!row) return SELLING_GROUPS[1];
+    if (row.nafdac_catalog_id || row.nafdacCatalogId) return SELLING_GROUPS[0];
+    
+    const codes = [
+      row.category_code, row.categoryCode, row.category_parent_code, row.parent_code, row.code
+    ].map(s => String(s || '').toUpperCase());
+
+    if (codes.includes('PHARMACEUTICALS')) return SELLING_GROUPS[0];
+    if (codes.includes('NON_PHARMACEUTICALS')) return SELLING_GROUPS[1];
+    
+    return SELLING_GROUPS[1];
+  }
+
   SR.util = {
     WAT_OFFSET_MINUTES,
     money, amount, numInput, qty, pct,
@@ -392,6 +416,6 @@
     esc, attr, titleCase, humanise, plural, initials,
     clamp, round2, sum, uniq, groupBy, by, slug,
     amountInWords, download, readFileAsText, debounce, sleep, localId, claimCode,
-    normalisePhone, isPhone, hashCode, bytes,
+    normalisePhone, isPhone, hashCode, bytes, sellingGroup, sellingGroups,
   };
 }(window));
