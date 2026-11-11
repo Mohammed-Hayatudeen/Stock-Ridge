@@ -77,11 +77,16 @@
 
   <!-- Kaaba Cube -->
   <g id="kaaba-cube">
-    <!-- Main Black Body -->
-    <rect x="169" y="176" width="174" height="200" fill="url(#kaaba-front)" stroke="#444" stroke-opacity="0.8" stroke-width="1.5"/>
-    
-    <!-- Subtle Gold Band (Hizam) -->
-    <!-- Crisp Top Edge Highlight -->
+    <!-- Top Block -->
+    <rect x="169" y="176" width="174" height="62" fill="url(#kaaba-front)" stroke="#444" stroke-opacity="0.8" stroke-width="1.5"/>
     <path d="M169.75 176.75 L342.25 176.75" fill="none" stroke="#555" stroke-opacity="0.9" stroke-width="1.5"/>
+    
+    <!-- Middle Block -->
+    <rect x="169" y="245" width="174" height="62" fill="url(#kaaba-front)" stroke="#444" stroke-opacity="0.8" stroke-width="1.5"/>
+    <path d="M169.75 245.75 L342.25 245.75" fill="none" stroke="#555" stroke-opacity="0.9" stroke-width="1.5"/>
+
+    <!-- Bottom Block -->
+    <rect x="169" y="314" width="174" height="62" fill="url(#kaaba-front)" stroke="#444" stroke-opacity="0.8" stroke-width="1.5"/>
+    <path d="M169.75 314.75 L342.25 314.75" fill="none" stroke="#555" stroke-opacity="0.9" stroke-width="1.5"/>
   </g>
 </svg>
