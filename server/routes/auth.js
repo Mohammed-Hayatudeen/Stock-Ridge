@@ -332,7 +332,11 @@ function mount(app, base = '/api/auth', makeEnv = null) {
       deviceId: ctx.req.header('X-Device-Id') || null,
     });
     const scope = await resolveScope(db, user);
-    ctx.json({ ok: true, userId: user.id, role: user.role, username: user.username, scope: serialiseScope(scope) });
+    let settings = null;
+    try {
+      settings = await db.first('SELECT data_reset_at FROM client_settings LIMIT 1');
+    } catch (e) {}
+    ctx.json({ ok: true, userId: user.id, role: user.role, username: user.username, scope: serialiseScope(scope), settings });
   });
 
   void usernameRule;

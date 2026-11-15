@@ -1716,7 +1716,7 @@
   function startSessionWatch() {
     if (!SR.api.hasToken()) return;
     if (sessionWatchTimer) clearInterval(sessionWatchTimer);
-    sessionWatchTimer = setInterval(() => { void watchSession(); }, 15000);
+    sessionWatchTimer = setInterval(() => { void watchSession(); }, 45000);
     if (!sessionWatchBound) {
       document.addEventListener('visibilitychange', onSessionVisible);
       // Do not ask /api/auth/me in the same breath as the line returning.
@@ -1738,7 +1738,7 @@
     // the shop's answer is checked even while Saving is on the screen.
     if (signingOut || !SR.api.hasToken()) return;
     try {
-      const me = await SR.api.me();
+      const me = await SR.api.get('/api/auth/verify');
       const stamp = me && me.settings && me.settings.data_reset_at;
       const cleared = stamp && SR.sync && SR.sync.honourReset ? await SR.sync.honourReset(stamp) : false;
       if (cleared && SR.sync.runOnce) SR.sync.runOnce({ full: true, silent: true }).catch(() => {});

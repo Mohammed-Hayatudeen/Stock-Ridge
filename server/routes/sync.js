@@ -620,6 +620,34 @@ function mount(app, base = '/api') {
     // The Nigerian-market migration plants 4,828 shared goods. A cap of 5,000
     // would cut the tail of that list once a shop also has its own catalogue.
     const fullSync = !since;
+    // If the device only wants a watermark check and has not requested any full
+    // tables, we can check a single global MAX timestamp across the entire schema 
+    // by reading the trigger-maintained sync_revisions table. If no table has an
+    // updated_at newer than 'since', we can skip executing 30+ empty SELECTs
+    // entirely. This drastically reduces Turso Free Tier logical read consumption.
+    if (wantWatermark && since && (!Array.isArray(body.full_tables) || body.full_tables.length === 0)) {
+      const db = ctx.env.DB || ctx.env.db;
+      try {
+        const latestRev = await db.first('SELECT MAX(updated_at) AS max_at FROM sync_revisions');
+        // If the database has never updated a table or the latest update is older/equal to 'since',
+        // we can safely abort and return an empty diff without running ANY delta queries.
+        if (latestRev && latestRev.max_at) {
+          if (latestRev.max_at <= toUtcSql(sinceRaw)) {
+            const cursor = utcNow();
+            return ctx.json({
+              ok: true, cursor, since: sinceRaw, fullSync: false,
+              tables: {}, totalRows: 0,
+              message: '0 row(s) changed since ' + sinceRaw + ' (Skipped via Global Revision optimization).',
+              truncatedTables: [], next: {},
+              revisions: revisionMap ? Object.fromEntries(revisionMap) : undefined
+            });
+          }
+        }
+      } catch (e) {
+        // Fallback to normal table-by-table checks if this fast-path fails
+      }
+    }
+
     // A named full table must not share the incremental cap. A till asking
     // for every sale, while the rest of the request is a cursor, used to
     // stop at 2,000 and then treat that slice as the whole book.
