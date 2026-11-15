@@ -58,3 +58,12 @@ WORK FLOW :(FOLLOW THIS SCRITLY)=>
 }
 
 }
+
+RELATIONSHIP & DEPENDENCY MATRIX :(MANDATORY ARCHITECTURAL GUIDE)=>
+{
+  [Module 6: Infrastructure] is the fundamental bedrock. Every module sits on top of this. If sync.js or store.js fails, all other modules degrade to their offline fallback states.
+  [Module 4: Governance] governs Identity. Modules 1, 2, 3, and 5 query this module's state (`SR.state.user.role`) constantly to reveal or hide restricted operations.
+  [Module 2: Warehouse] acts as the absolute master data source for [Module 1: Front Office]. POS cannot sell what isn't in the sellable index.
+  [Module 1: Front Office] generates the raw transactional payloads (Sales, Returns, Owed) which are aggregated by [Module 3: Back Office] to compute Gross Margin, COGS, and Tax.
+  [Module 5: Logistics] intercepts payloads from [Module 1] and locks them into dispatch states until fulfilled, effectively pausing [Module 3]'s revenue recognition loops for cash-on-delivery flows.
+}

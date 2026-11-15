@@ -8,5 +8,9 @@
 - **Internal Transfers (transfers.js):** Moving goods between branches (e.g., from HQ warehouse to Karu branch).
 - **Stocktake (stocktake.js):** Physical inventory counts and shrinkage adjustments.
 
----
-*Log and document ongoing changes, dependencies, and external research related to this module here.*
+## 🔎 Agent Audit Checkpoint & Module Dependencies
+- **Status:** PILOT AUDIT COMPLETED.
+- **Dependency Map:** Upstream dependent on `Admin (Module 4)` for Role guards (Only Owners/Managers can authorize manual shrinkage or `cost_price` overrides). 
+- **Recent Weakness Addressed:** Implemented offline-catalogue scoping by `business_id` rather than `user_id` to prevent multi-cashier catalogue drops.
+- **Known Gaps / Action Items:** 
+  1. Negative stock quantity prevention relies heavily on local sync states. Needs tighter remote validation locking during heavy concurrent transaction volumes across multiple branches.
