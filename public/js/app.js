@@ -1966,27 +1966,31 @@
   }
 
   async function doLogin(ev) {
-    ev.preventDefault();
+    try { ev.preventDefault(); } catch (e) {}
     const form = ev.currentTarget;
     const usernameEl = document.getElementById('login-username');
     const pinEl = document.getElementById('login-pin');
     const errEl = document.getElementById('login-error');
     const submit = document.getElementById('login-submit');
-    errEl.hidden = true;
+    if (errEl) errEl.hidden = true;
 
-    const username = String(usernameEl.value || '').trim().toLowerCase();
-    const pin = String(pinEl.value || '').trim();
+    const username = String((usernameEl && usernameEl.value) || '').trim().toLowerCase();
+    const pin = String((pinEl && pinEl.value) || '').trim();
     const rememberEl = document.getElementById('login-remember');
     const remember = !rememberEl || rememberEl.checked;
     if (!username || !pin) {
-      errEl.textContent = 'Enter your username and PIN.';
-      errEl.hidden = false;
+      if (errEl) {
+        errEl.textContent = 'Enter your username and PIN.';
+        errEl.hidden = false;
+      }
       return;
     }
 
-    submit.disabled = true;
-    submit.classList.add('is-busy');
-    submit.textContent = 'Signing in…';
+    if (submit) {
+      submit.disabled = true;
+      submit.classList.add('is-busy');
+      submit.textContent = 'Signing in…';
+    }
     try {
       // A phone with no network must not wait on a dead sign-in and then say
       // the shop is up. Electron ignores this flag: its proxy can still answer.
