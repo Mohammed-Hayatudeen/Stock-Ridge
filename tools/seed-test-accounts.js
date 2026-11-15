@@ -17,6 +17,8 @@ function hashPin(pin) {
   return `pbkdf2$sha256$1000$${bytesToBase64url(salt)}$${derived.toString('hex')}`;
 }
 
+const idGen = () => crypto.randomBytes(8).toString('hex');
+
 function loadEnvFile() {
   const file = path.join(__dirname, '..', '.env.deploy');
   if (!fs.existsSync(file)) return;
@@ -34,53 +36,137 @@ async function run() {
   loadEnvFile();
   const url = process.env.TURSO_DATABASE_URL;
   const authToken = process.env.TURSO_AUTH_TOKEN;
-  if (!url || !authToken) {
-    throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required in the environment or .env.deploy file.');
-  }
-
+  if (!url || !authToken) throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN required');
   const db = createTursoDatabase({ url, authToken, name: 'stock2' });
 
-  const docPath = path.join(__dirname, '..', 'doc', 'test-accounts.md');
-  const text = fs.readFileSync(docPath, 'utf8');
-  
-  const usersToUpdate = [];
-  for (const line of text.split('\n')) {
-    if (line.trim().startsWith('|') && !line.includes('---|')) {
-      const parts = line.split('|').map(s => s.trim()).filter(Boolean);
-      if (parts.length >= 5) {
-        const username = parts[1];
-        let role = parts[2].toUpperCase();
-        if (role === 'PROPRIETOR' || role === 'MANUFAC') role = 'OWNER';
-        if (role === 'ADMINISTRATOR') role = 'ADMIN';
-        if (role === 'GENERAL MANAGER') role = 'MANAGER';
-        let pin = parts[parts.length - 1].replace('*', '');
-        if (username !== 'Username' && username.length > 0 && /^\d+$/.test(pin)) {
-          usersToUpdate.push({ username, pin, role });
-        }
+  const biz = [
+    { id: idGen(), name: 'AquaRidge', profile: 'WATER', branches: ['AquaRidge', 'Aquakaru'] },
+    { id: idGen(), name: 'BakeRidge', profile: 'BAKERY', branches: ['BakeRidge', 'BakeKaru'] },
+    { id: idGen(), name: 'ElecRidge', profile: 'ELECTRONICS', branches: ['ElecRidge', 'ElecKaru'] },
+    { id: idGen(), name: 'EventRidge', profile: 'RENTAL', branches: ['eventRidge HQ', 'EventKaru'] },
+    { id: idGen(), name: 'PharmaRidge', profile: 'PHARMACY', branches: ['pharmaHq', 'pharmakaru'] },
+    { id: idGen(), name: 'WareRidge', profile: 'WAREHOUSE', branches: ['wareRidge HQ', 'warekaru'] },
+    { id: idGen(), name: 'woodRidge', profile: 'TIMBER', branches: ['woodRidge HQ', 'woodkaru'] }
+  ];
+
+  const branchMap = {}; // name -> { id, bizId }
+
+  console.log('Inserting Businesses and Branches...');
+  for (let i = 0; i < biz.length; i++) {
+    const b = biz[i];
+    await db.batch([{
+      sql: 'INSERT INTO businesses (id, name, profile_code, is_active, is_deleted) VALUES (?, ?, ?, 1, 0)',
+      params: [b.id, b.name, b.profile]
+    }], { foreignKeys: false });
+
+    for (const brName of b.branches) {
+      const brId = idGen();
+      branchMap[brName.toLowerCase()] = { id: brId, bizId: b.id };
+      await db.batch([{
+        sql: 'INSERT INTO branches (id, business_id, name, code, is_active, is_deleted) VALUES (?, ?, ?, ?, 1, 0)',
+        params: [brId, b.id, brName, brName.replace(/\s+/g, '').toUpperCase().slice(0, 10)]
+      }], { foreignKeys: false });
+    }
+  }
+
+  const users = [
+    // Top-Level
+    { u: 'ceo', p: '9000', r: 'OWNER', global: true },
+    { u: 'cceo', p: '8000', r: 'OWNER', bizAccess: [biz[0].id, biz[1].id, biz[6].id] },
+    { u: 'admin', p: '7000', r: 'ADMIN', global: true },
+    // GMs
+    { u: 'gmaqua', p: '1000', r: 'MANAGER', bizPrimary: biz[0].id },
+    { u: 'gmbake', p: '1001', r: 'MANAGER', bizPrimary: biz[1].id },
+    { u: 'gmelect', p: '1002', r: 'MANAGER', bizPrimary: biz[2].id },
+    { u: 'gmevent', p: '1003', r: 'MANAGER', bizPrimary: biz[3].id },
+    { u: 'gmpharma', p: '1004', r: 'MANAGER', bizPrimary: biz[4].id },
+    { u: 'gmware', p: '1005', r: 'MANAGER', bizPrimary: biz[5].id },
+    { u: 'gmwood', p: '1006', r: 'MANAGER', bizPrimary: biz[6].id },
+    // Branches
+    // Aqua
+    { u: 'astaff2abuja', p: '3210', r: 'STAFF', br: 'aquaridge' },
+    { u: 'astaff3abuja', p: '3310', r: 'STAFF', br: 'aquaridge' },
+    { u: 'amgr1karu', p: '2120', r: 'MANAGER', br: 'aquakaru' },
+    { u: 'astaff2karu', p: '3220', r: 'STAFF', br: 'aquakaru' },
+    { u: 'astaff1karu', p: '3120', r: 'STAFF', br: 'aquakaru' },
+    { u: 'astaff1abuja', p: '3110', r: 'STAFF', br: 'aquakaru' },
+    // Bake
+    { u: 'bstaff1abuja', p: '3111', r: 'STAFF', br: 'bakeridge' },
+    { u: 'bstaff2abuja', p: '3211', r: 'STAFF', br: 'bakeridge' },
+    { u: 'bstaff3abuja', p: '3311', r: 'STAFF', br: 'bakeridge' },
+    { u: 'bmgr1karu', p: '2121', r: 'MANAGER', br: 'bakekaru' },
+    { u: 'bstaff1karu', p: '3121', r: 'STAFF', br: 'bakekaru' },
+    { u: 'bstaff2karu', p: '3221', r: 'STAFF', br: 'bakekaru' },
+    // Elec
+    { u: 'elstaff1abuja', p: '3112', r: 'STAFF', br: 'elecridge' },
+    { u: 'elstaff2abuja', p: '3212', r: 'STAFF', br: 'elecridge' },
+    { u: 'elstaff3abuja', p: '3312', r: 'STAFF', br: 'elecridge' },
+    { u: 'elmgr1karu', p: '2122', r: 'MANAGER', br: 'eleckaru' },
+    { u: 'elstaff1karu', p: '3122', r: 'STAFF', br: 'eleckaru' },
+    { u: 'elstaff2karu', p: '3222', r: 'STAFF', br: 'eleckaru' },
+    // Event
+    { u: 'evstaff1abuja', p: '3113', r: 'STAFF', br: 'eventridge hq' },
+    { u: 'evstaff2abuja', p: '3213', r: 'STAFF', br: 'eventridge hq' },
+    { u: 'evstaff3abuja', p: '3313', r: 'STAFF', br: 'eventridge hq' },
+    { u: 'evmgr1karu', p: '2123', r: 'MANAGER', br: 'eventkaru' },
+    { u: 'evstaff1karu', p: '3123', r: 'STAFF', br: 'eventkaru' },
+    { u: 'evstaff2karu', p: '3223', r: 'STAFF', br: 'eventkaru' },
+    // Pharma
+    { u: 'pstaff1abuja', p: '3114', r: 'STAFF', br: 'pharmahq' },
+    { u: 'pstaff2abuja', p: '3214', r: 'STAFF', br: 'pharmahq' },
+    { u: 'pstaff3abuja', p: '3314', r: 'STAFF', br: 'pharmahq' },
+    { u: 'pmgr1karu', p: '2124', r: 'MANAGER', br: 'pharmakaru' },
+    { u: 'pstaff1karu', p: '3124', r: 'STAFF', br: 'pharmakaru' },
+    { u: 'pstaff2karu', p: '3224', r: 'STAFF', br: 'pharmakaru' },
+    // Ware
+    { u: 'wastaff1abuja', p: '3115', r: 'STAFF', br: 'wareridge hq' },
+    { u: 'wastaff2abuja', p: '3215', r: 'STAFF', br: 'wareridge hq' },
+    { u: 'wastaff3abuja', p: '3315', r: 'STAFF', br: 'wareridge hq' },
+    { u: 'wamgr1karu', p: '2125', r: 'MANAGER', br: 'warekaru' },
+    { u: 'wastaff1karu', p: '3125', r: 'STAFF', br: 'warekaru' },
+    { u: 'wastaff2karu', p: '3225', r: 'STAFF', br: 'warekaru' },
+    // Wood
+    { u: 'wostaff1abuja', p: '3116', r: 'STAFF', br: 'woodridge hq' },
+    { u: 'wostaff2abuja', p: '3216', r: 'STAFF', br: 'woodridge hq' },
+    { u: 'wostaff3abuja', p: '3316', r: 'STAFF', br: 'woodridge hq' },
+    { u: 'womgr1karu', p: '2126', r: 'MANAGER', br: 'woodkaru' },
+    { u: 'wostaff1karu', p: '3126', r: 'STAFF', br: 'woodkaru' },
+    { u: 'wostaff2karu', p: '3226', r: 'STAFF', br: 'woodkaru' }
+  ];
+
+  console.log('Inserting Users...');
+  for (const u of users) {
+    const uid = idGen();
+    const hp = hashPin(u.p);
+    
+    let bId = null;
+    let brId = null;
+
+    if (u.bizPrimary) bId = u.bizPrimary;
+    if (u.br) {
+      const bmap = branchMap[u.br];
+      if (bmap) {
+        brId = bmap.id;
+        bId = null;
+      }
+    }
+
+    await db.batch([{
+      sql: 'INSERT INTO users (id, username, pin_hash, role, business_id, branch_id, is_active, is_deleted) VALUES (?, ?, ?, ?, ?, ?, 1, 0)',
+      params: [uid, u.u, hp, u.r, bId, brId]
+    }], { foreignKeys: false });
+
+    if (u.bizAccess) {
+      for (const aId of u.bizAccess) {
+        await db.batch([{
+          sql: 'INSERT INTO user_business_access (id, user_id, business_id, is_deleted) VALUES (?, ?, ?, 0)',
+          params: [idGen(), uid, aId]
+        }], { foreignKeys: false });
       }
     }
   }
 
-  console.log(`Found ${usersToUpdate.length} accounts to process in doc/test-accounts.md.`);
-
-  for (const { username, pin, role } of usersToUpdate) {
-    const hashedPin = hashPin(pin);
-    try {
-      const existing = await db.all('SELECT id FROM users WHERE username = ?', [username]);
-      if (existing && existing.length > 0) {
-        await db.run('UPDATE users SET pin_hash = ? WHERE username = ?', [hashedPin, username]);
-        console.log(`✅ Updated PIN for existing user: ${username}`);
-      } else {
-        await db.run('INSERT INTO users (username, pin_hash, role, active) VALUES (?, ?, ?, 1)', [username, hashedPin, role]);
-        console.log(`✨ Inserted missing user: ${username} (Role: ${role})`);
-      }
-    } catch (err) {
-      console.error(`❌ Failed to process ${username}: ${err.message}`);
-    }
-  }
+  console.log('✅ DB Seed Complete!');
 }
 
-run().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+run().catch(console.error);
