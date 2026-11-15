@@ -25,13 +25,25 @@ async function run() {
   const db = createTursoDatabase({ url, authToken, name: 'stock2' });
 
   console.log('🚀 FORMATTING TURSO DATABASE (Wiping Users, Businesses, Branches, Access)...');
-  
-  // Hard delete all identities and limits to fully clean the DB limits
-  await db.run('DELETE FROM users');
-  await db.run('DELETE FROM user_business_access');
-  await db.run('DELETE FROM user_sessions');
-  await db.run('DELETE FROM branches');
-  await db.run('DELETE FROM businesses');
+
+  const tables = [
+    'user_business_access',
+    'user_sessions',
+    'users',
+    'branches',
+    'businesses'
+  ];
+
+  // We explicitly use raw batches with foreignKeys: false to bypass constraint blocks
+  // that were silently preventing the deletions in Turso.
+  for (const table of tables) {
+    try {
+      await db.batch([{ sql: `DELETE FROM ${table}` }], { foreignKeys: false });
+      console.log(`Cleared table: ${table}`);
+    } catch (e) {
+      console.error(`Failed to clear ${table}:`, e.message);
+    }
+  }
 
   const bizCount = await db.scalar('SELECT COUNT(*) FROM businesses');
   const branchCount = await db.scalar('SELECT COUNT(*) FROM branches');
