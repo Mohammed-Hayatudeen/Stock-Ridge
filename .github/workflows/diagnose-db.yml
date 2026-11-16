@@ -1,0 +1,41 @@
+name: Diagnose DB Connection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check DB Connection
+        run: |
+          node -e "
+            const { createTursoDatabase } = require('./worker/src/turso');
+            async function test() {
+              console.log('URL Length:', process.env.TURSO_DATABASE_URL ? process.env.TURSO_DATABASE_URL.length : 0);
+              console.log('Token Length:', process.env.TURSO_AUTH_TOKEN ? process.env.TURSO_AUTH_TOKEN.length : 0);
+              try {
+                const db = createTursoDatabase({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN, name: 'stock2' });
+                const r = await db.scalar('SELECT 1');
+                console.log('Connection OK:', r);
+              } catch (e) {
+                console.error('Connection Failed:', e.message);
+                process.exit(1);
+              }
+            }
+            test();
+          "
+      - name: Run Migrations
+        if: always()
+        run: npm run turso:migrate || true
+      - name: Run Reset/Seed
+        if: always()
+        run: node tools/reset-db.js || true
