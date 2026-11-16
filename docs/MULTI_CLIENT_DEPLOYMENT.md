@@ -521,3 +521,14 @@ Prefer the reviewed GitHub Actions workflow when that is the client's deployment
 - A native build is being described as installed/opened without actual device evidence.
 
 Correct the target or failed layer before continuing. Never “try it and see” against a client's live books.
+
+## 10. Architectural Alignment (The 6-Module ERP Core)
+StockRidge is a highly structured Local-First Monolith separated into 6 logical domains:
+1. **Front Office (POS & Operations)**
+2. **Warehouse (Inventory & Supply Chain)**
+3. **Back Office (Accounting & Finance)**
+4. **Governance (Admin, HR & Compliance)**
+5. **Logistics (Fleet & Delivery)**
+6. **Infrastructure (Platform & SQLite Sync Engine)**
+
+When deploying to a new client, remember that **Module 6 (Infrastructure)** operates via Turso polling and local SQLite delta-syncs (`lib/shop-clone.js`). The entire application functions offline-first. Never modify the client's local cache directly; all states are reconciled by the Cloudflare Worker via `sync_revisions` cursors on `updated_at` indexes.

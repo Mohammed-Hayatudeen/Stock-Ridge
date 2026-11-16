@@ -19,18 +19,34 @@ function hashPin(pin) {
 
 const idGen = () => crypto.randomBytes(8).toString('hex');
 
+function loadEnvFile() {
+  const file = path.join(__dirname, '..', '.env.deploy');
+  if (!fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
+    if (!m) continue;
+    const [, key, raw] = m;
+    if (process.env[key]) continue;
+    const value = raw.replace(/^["']|["']$/g, '');
+    if (value) process.env[key] = value;
+  }
+}
+
 async function run() {
+  loadEnvFile();
   const url = process.env.TURSO_DATABASE_URL;
   const authToken = process.env.TURSO_AUTH_TOKEN;
   if (!url || !authToken) throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN required');
   const db = createTursoDatabase({ url, authToken, name: 'stock2' });
 
   console.log('Wiping tables...');
-  await db.run('DELETE FROM businesses');
-  await db.run('DELETE FROM branches');
-  await db.run('DELETE FROM users');
-  await db.run('DELETE FROM user_business_access');
-  await db.run('DELETE FROM user_sessions');
+  await db.batch([
+    { sql: 'DELETE FROM user_business_access' },
+    { sql: 'DELETE FROM user_sessions' },
+    { sql: 'DELETE FROM users' },
+    { sql: 'DELETE FROM branches' },
+    { sql: 'DELETE FROM businesses' }
+  ], { foreignKeys: false });
 
   const biz = [
     { id: idGen(), name: 'AquaRidge', profile: 'WATER', branches: ['AquaRidge', 'Aquakaru'] },
@@ -39,7 +55,14 @@ async function run() {
     { id: idGen(), name: 'EventRidge', profile: 'RENTAL', branches: ['eventRidge HQ', 'EventKaru'] },
     { id: idGen(), name: 'PharmaRidge', profile: 'PHARMACY', branches: ['pharmaHq', 'pharmakaru'] },
     { id: idGen(), name: 'WareRidge', profile: 'WAREHOUSE', branches: ['wareRidge HQ', 'warekaru'] },
-    { id: idGen(), name: 'woodRidge', profile: 'TIMBER', branches: ['woodRidge HQ', 'woodkaru'] }
+    { id: idGen(), name: 'woodRidge', profile: 'TIMBER', branches: ['woodRidge HQ', 'woodkaru'] },
+    { id: idGen(), name: 'BuildRidge', profile: 'BUILDING_MATERIALS', branches: ['BuildRidge HQ', 'BuildKaru'] },
+    { id: idGen(), name: 'EquipRidge', profile: 'EQUIPMENT_RENTAL', branches: ['EquipRidge HQ', 'EquipKaru'] },
+    { id: idGen(), name: 'LeaseRidge', profile: 'LEASING', branches: ['LeaseRidge HQ', 'LeaseKaru'] },
+    { id: idGen(), name: 'SellLeaseRidge', profile: 'SELL_AND_LEASE', branches: ['SellLeaseRidge HQ', 'SellLeaseKaru'] },
+    { id: idGen(), name: 'FabricRidge', profile: 'PROVISIONS_FABRICS', branches: ['FabricRidge HQ', 'FabricKaru'] },
+    { id: idGen(), name: 'MarketRidge', profile: 'SUPERMARKET', branches: ['MarketRidge HQ', 'MarketKaru'] },
+    { id: idGen(), name: 'GeneralRidge', profile: 'GENERAL_RETAIL', branches: ['GeneralRidge HQ', 'GeneralKaru'] }
   ];
 
   const branchMap = {}; // name -> { id, bizId }
@@ -47,17 +70,18 @@ async function run() {
   console.log('Inserting Businesses and Branches...');
   for (let i = 0; i < biz.length; i++) {
     const b = biz[i];
-    await db.run(
-      'INSERT INTO businesses (id, name, profile_code, is_active, is_deleted) VALUES (?, ?, ?, 1, 0)',
-      [b.id, b.name, b.profile]
-    );
+    await db.batch([{
+      sql: 'INSERT INTO businesses (id, name, profile_code, is_active, is_deleted) VALUES (?, ?, ?, 1, 0)',
+      params: [b.id, b.name, b.profile]
+    }], { foreignKeys: false });
+
     for (const brName of b.branches) {
       const brId = idGen();
       branchMap[brName.toLowerCase()] = { id: brId, bizId: b.id };
-      await db.run(
-        'INSERT INTO branches (id, business_id, name, code, is_active, is_deleted) VALUES (?, ?, ?, ?, 1, 0)',
-        [brId, b.id, brName, brName.replace(/\s+/g, '').toUpperCase().slice(0, 10)]
-      );
+      await db.batch([{
+        sql: 'INSERT INTO branches (id, business_id, name, code, is_active, is_deleted) VALUES (?, ?, ?, ?, 1, 0)',
+        params: [brId, b.id, brName, brName.replace(/\s+/g, '').toUpperCase().slice(0, 10)]
+      }], { foreignKeys: false });
     }
   }
 
@@ -74,6 +98,14 @@ async function run() {
     { u: 'gmpharma', p: '1004', r: 'MANAGER', bizPrimary: biz[4].id },
     { u: 'gmware', p: '1005', r: 'MANAGER', bizPrimary: biz[5].id },
     { u: 'gmwood', p: '1006', r: 'MANAGER', bizPrimary: biz[6].id },
+    { u: 'gmbuild', p: '1007', r: 'MANAGER', bizPrimary: biz[7].id },
+    { u: 'gmequip', p: '1008', r: 'MANAGER', bizPrimary: biz[8].id },
+    { u: 'gmlease', p: '1009', r: 'MANAGER', bizPrimary: biz[9].id },
+    { u: 'gmselllease', p: '1010', r: 'MANAGER', bizPrimary: biz[10].id },
+    { u: 'gmfabric', p: '1011', r: 'MANAGER', bizPrimary: biz[11].id },
+    { u: 'gmmarket', p: '1012', r: 'MANAGER', bizPrimary: biz[12].id },
+    { u: 'gmgeneral', p: '1013', r: 'MANAGER', bizPrimary: biz[13].id },
+    
     // Branches
     // Aqua
     { u: 'astaff2abuja', p: '3210', r: 'STAFF', br: 'aquaridge' },
@@ -123,7 +155,63 @@ async function run() {
     { u: 'wostaff3abuja', p: '3316', r: 'STAFF', br: 'woodridge hq' },
     { u: 'womgr1karu', p: '2126', r: 'MANAGER', br: 'woodkaru' },
     { u: 'wostaff1karu', p: '3126', r: 'STAFF', br: 'woodkaru' },
-    { u: 'wostaff2karu', p: '3226', r: 'STAFF', br: 'woodkaru' }
+    { u: 'wostaff2karu', p: '3226', r: 'STAFF', br: 'woodkaru' },
+    
+    // Build
+    { u: 'bmstaff1abuja', p: '1118', r: 'STAFF', br: 'buildridge hq' },
+    { u: 'bmstaff2abuja', p: '1218', r: 'STAFF', br: 'buildridge hq' },
+    { u: 'bmstaff3abuja', p: '1318', r: 'STAFF', br: 'buildridge hq' },
+    { u: 'bmmgr1karu', p: '2128', r: 'MANAGER', br: 'buildkaru' },
+    { u: 'bmstaff1karu', p: '1128', r: 'STAFF', br: 'buildkaru' },
+    { u: 'bmstaff2karu', p: '1228', r: 'STAFF', br: 'buildkaru' },
+    
+    // Equip
+    { u: 'eqstaff1abuja', p: '1119', r: 'STAFF', br: 'equipridge hq' },
+    { u: 'eqstaff2abuja', p: '1219', r: 'STAFF', br: 'equipridge hq' },
+    { u: 'eqstaff3abuja', p: '1319', r: 'STAFF', br: 'equipridge hq' },
+    { u: 'eqmgr1karu', p: '2129', r: 'MANAGER', br: 'equipkaru' },
+    { u: 'eqstaff1karu', p: '1129', r: 'STAFF', br: 'equipkaru' },
+    { u: 'eqstaff2karu', p: '1229', r: 'STAFF', br: 'equipkaru' },
+    
+    // Lease
+    { u: 'lestaff1abuja', p: '11110', r: 'STAFF', br: 'leaseridge hq' },
+    { u: 'lestaff2abuja', p: '12110', r: 'STAFF', br: 'leaseridge hq' },
+    { u: 'lestaff3abuja', p: '13110', r: 'STAFF', br: 'leaseridge hq' },
+    { u: 'lemgr1karu', p: '21210', r: 'MANAGER', br: 'leasekaru' },
+    { u: 'lestaff1karu', p: '11210', r: 'STAFF', br: 'leasekaru' },
+    { u: 'lestaff2karu', p: '12210', r: 'STAFF', br: 'leasekaru' },
+    
+    // SellLease
+    { u: 'slstaff1abuja', p: '11111', r: 'STAFF', br: 'sellleaseridge hq' },
+    { u: 'slstaff2abuja', p: '12111', r: 'STAFF', br: 'sellleaseridge hq' },
+    { u: 'slstaff3abuja', p: '13111', r: 'STAFF', br: 'sellleaseridge hq' },
+    { u: 'slmgr1karu', p: '21211', r: 'MANAGER', br: 'sellleasekaru' },
+    { u: 'slstaff1karu', p: '11211', r: 'STAFF', br: 'sellleasekaru' },
+    { u: 'slstaff2karu', p: '12211', r: 'STAFF', br: 'sellleasekaru' },
+    
+    // Fabric
+    { u: 'pfstaff1abuja', p: '11112', r: 'STAFF', br: 'fabricridge hq' },
+    { u: 'pfstaff2abuja', p: '12112', r: 'STAFF', br: 'fabricridge hq' },
+    { u: 'pfstaff3abuja', p: '13112', r: 'STAFF', br: 'fabricridge hq' },
+    { u: 'pfmgr1karu', p: '21212', r: 'MANAGER', br: 'fabrickaru' },
+    { u: 'pfstaff1karu', p: '11212', r: 'STAFF', br: 'fabrickaru' },
+    { u: 'pfstaff2karu', p: '12212', r: 'STAFF', br: 'fabrickaru' },
+    
+    // Market
+    { u: 'sustaff1abuja', p: '11113', r: 'STAFF', br: 'marketridge hq' },
+    { u: 'sustaff2abuja', p: '12113', r: 'STAFF', br: 'marketridge hq' },
+    { u: 'sustaff3abuja', p: '13113', r: 'STAFF', br: 'marketridge hq' },
+    { u: 'sumgr1karu', p: '21213', r: 'MANAGER', br: 'marketkaru' },
+    { u: 'sustaff1karu', p: '11213', r: 'STAFF', br: 'marketkaru' },
+    { u: 'sustaff2karu', p: '12213', r: 'STAFF', br: 'marketkaru' },
+    
+    // General
+    { u: 'grstaff1abuja', p: '11114', r: 'STAFF', br: 'generalridge hq' },
+    { u: 'grstaff2abuja', p: '12114', r: 'STAFF', br: 'generalridge hq' },
+    { u: 'grstaff3abuja', p: '13114', r: 'STAFF', br: 'generalridge hq' },
+    { u: 'grmgr1karu', p: '21214', r: 'MANAGER', br: 'generalkaru' },
+    { u: 'grstaff1karu', p: '11214', r: 'STAFF', br: 'generalkaru' },
+    { u: 'grstaff2karu', p: '12214', r: 'STAFF', br: 'generalkaru' }
   ];
 
   console.log('Inserting Users...');
@@ -133,32 +221,32 @@ async function run() {
     
     let bId = null;
     let brId = null;
-    let isGlobal = u.global ? 1 : 0;
 
     if (u.bizPrimary) bId = u.bizPrimary;
     if (u.br) {
       const bmap = branchMap[u.br];
       if (bmap) {
         brId = bmap.id;
-        bId = null; // usually staff bounded to branch
+        bId = null;
       }
     }
 
-    await db.run(
-      'INSERT INTO users (id, username, pin_hash, role, business_id, branch_id, is_active, is_deleted) VALUES (?, ?, ?, ?, ?, ?, 1, 0)',
-      [uid, u.u, hp, u.r, bId, brId]
-    );
+    await db.batch([{
+      sql: 'INSERT INTO users (id, username, pin_hash, role, business_id, branch_id, is_active, is_deleted) VALUES (?, ?, ?, ?, ?, ?, 1, 0)',
+      params: [uid, u.u, hp, u.r, bId, brId]
+    }], { foreignKeys: false });
 
     if (u.bizAccess) {
       for (const aId of u.bizAccess) {
-        await db.run(
-          'INSERT INTO user_business_access (id, user_id, business_id, is_deleted) VALUES (?, ?, ?, 0)',
-          [idGen(), uid, aId]
-        );
+        await db.batch([{
+          sql: 'INSERT INTO user_business_access (id, user_id, business_id, is_deleted) VALUES (?, ?, ?, 0)',
+          params: [idGen(), uid, aId]
+        }], { foreignKeys: false });
       }
     }
   }
 
-  console.log('DB Reset Complete!');
+  console.log('✅ DB Migration & Seed Complete!');
 }
+
 run().catch(console.error);
