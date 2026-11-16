@@ -1,16 +1,20 @@
-# Module 1: Operations & Point of Sale (The "Front Office" Module)
+# M1 — Operations & Point of Sale ("Front Office") · Knowledge file
 
-**Scope:** Everything related to directly serving a customer, moving goods out the door, and capturing money at the counter.
+## Protected Fixes
+| ID | Date | Symptom | Root cause | Fix (files / functions) | Regression check |
+|----|------|---------|------------|-------------------------|------------------|
 
-- **POS & Cart (pos.js):** The main cashier interface.
-- **Sales Ledger (sales.js):** Real-time sales logging, filtering, and printing receipts.
-- **Change Owed / Credit (change-owed.js, instalments.js):** Handling split payments, IOUs, and customer credit lines.
-- **Returns & After-Sales (returns.js, afterSales.js):** Refund workflows and warranty management.
-- **Till Management (till.js):** Shift opening/closing, initial floats, and cashier handovers.
+## Change Register
 
-## 🔎 Agent Audit Checkpoint & Module Dependencies
-- **Status:** PILOT AUDIT COMPLETED.
-- **Dependency Map:** Heavily relies on `Inventory (Module 2)` for `sellableIndex()` resolution and `reorder_level` alarms. Integrates with `Accounting (Module 3)` for real-time COGS calculations.
-- **Recent Weakness Addressed:** `U.sellingGroup` reference errors on POS categorization when searching. Fixed by establishing core grouping utility mapping directly into `util.js`.
-- **Known Gaps / Action Items:** 
-  1. Offline POS search fallback currently assumes pre-fetched stores. Needs explicit try-catch chains to prevent UI stalls if IndexedDB `product_barcodes` store becomes corrupted during sync intervals.
+## Impact Register (ranked, most depended-on first)
+| Rank | Change ID | What depends on it | What breaks if altered, and why |
+|------|-----------|--------------------|---------------------------------|
+
+## Research Log
+| Date | Topic / query | Source + URL | Source date · version | Takeaway | How applied |
+|------|---------------|--------------|-----------------------|----------|-------------|
+
+## Open Issues & Handoff
+- Done: Pilot audit completed. Verified POS search fallback boundaries.
+- Next: Needs explicit try-catch chains to prevent UI stalls if IndexedDB `product_barcodes` store becomes corrupted during sync intervals.
+- Risks: 

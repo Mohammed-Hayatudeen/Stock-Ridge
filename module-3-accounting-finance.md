@@ -1,14 +1,20 @@
-# Module 3: Accounting & Finance (The "Back Office" Module)
+# M3 — Accounting & Finance ("Back Office") · Knowledge file
 
-**Scope:** Deep financial tracking, ledgers, and profit calculations removed from daily operations.
+## Protected Fixes
+| ID | Date | Symptom | Root cause | Fix (files / functions) | Regression check |
+|----|------|---------|------------|-------------------------|------------------|
 
-- **General Ledger (accounting.js):** Tracking revenue, cost of goods sold (COGS), chart of accounts, and gross margins.
-- **Expenses (expenses.js, finance.js):** Operational costs, salaries, fuel, and branch-specific overhead logging.
-- **Reporting (reports.js, dashboard.js):** Analytical engines compiling tax, profit/loss, and end-of-day snapshots across branches.
+## Change Register
 
-## 🔎 Agent Audit Checkpoint & Module Dependencies
-- **Status:** PILOT AUDIT COMPLETED.
-- **Dependency Map:** Consumes payloads downstream from `Front Office (Module 1)` and `Inventory (Module 2)`.
-- **Recent Weakness Addressed:** Resolved ReferenceErrors mapping SQL parameters `todayspan` and `branch_safe_ledger` missing columns. Safely isolated and guarded Gross Margin percentage math against `zero-division / NaN`.
-- **Known Gaps / Action Items:** 
-  1. `grossMarginPct` rounding accuracy logic could compound discrepancies across massive enterprise monthly queries. Needs aggregate bounds auditing.
+## Impact Register (ranked, most depended-on first)
+| Rank | Change ID | What depends on it | What breaks if altered, and why |
+|------|-----------|--------------------|---------------------------------|
+
+## Research Log
+| Date | Topic / query | Source + URL | Source date · version | Takeaway | How applied |
+|------|---------------|--------------|-----------------------|----------|-------------|
+
+## Open Issues & Handoff
+- Done: Pilot audit completed. Resolved ReferenceErrors missing columns (`todayspan`, `branch_safe_ledger`). Safely isolated Gross Margin percentage math against `zero-division / NaN`.
+- Next: `grossMarginPct` rounding accuracy logic could compound discrepancies across massive enterprise monthly queries. Needs aggregate bounds auditing.
+- Risks: 

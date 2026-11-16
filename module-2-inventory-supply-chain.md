@@ -1,16 +1,20 @@
-# Module 2: Inventory & Supply Chain (The "Warehouse" Module)
+# M2 — Inventory & Supply Chain ("Warehouse") · Knowledge file
 
-**Scope:** Physical goods moving into the business, cataloging, moving between branches, and auditing.
+## Protected Fixes
+| ID | Date | Symptom | Root cause | Fix (files / functions) | Regression check |
+|----|------|---------|------------|-------------------------|------------------|
 
-- **Catalogue / Products (products.js, catalog.js):** Master data management (unit ladders, variants, base margins, selling groups).
-- **Stock & Batches (stock.js):** Real-time on-hand quantities, expiry tracking, serial numbers, and reorder levels.
-- **Purchase Orders & Suppliers (purchase-orders.js, suppliers.js):** Interfacing with vendors and forecasting.
-- **Internal Transfers (transfers.js):** Moving goods between branches (e.g., from HQ warehouse to Karu branch).
-- **Stocktake (stocktake.js):** Physical inventory counts and shrinkage adjustments.
+## Change Register
 
-## 🔎 Agent Audit Checkpoint & Module Dependencies
-- **Status:** PILOT AUDIT COMPLETED.
-- **Dependency Map:** Upstream dependent on `Admin (Module 4)` for Role guards (Only Owners/Managers can authorize manual shrinkage or `cost_price` overrides). 
-- **Recent Weakness Addressed:** Implemented offline-catalogue scoping by `business_id` rather than `user_id` to prevent multi-cashier catalogue drops.
-- **Known Gaps / Action Items:** 
-  1. Negative stock quantity prevention relies heavily on local sync states. Needs tighter remote validation locking during heavy concurrent transaction volumes across multiple branches.
+## Impact Register (ranked, most depended-on first)
+| Rank | Change ID | What depends on it | What breaks if altered, and why |
+|------|-----------|--------------------|---------------------------------|
+
+## Research Log
+| Date | Topic / query | Source + URL | Source date · version | Takeaway | How applied |
+|------|---------------|--------------|-----------------------|----------|-------------|
+
+## Open Issues & Handoff
+- Done: Pilot audit completed. Implemented offline-catalogue scoping by `business_id` rather than `user_id`. Fixed `U.sellingGroup` ReferenceErrors.
+- Next: Negative stock quantity prevention relies heavily on local sync states. Needs tighter remote validation locking during heavy concurrent transaction volumes across multiple branches.
+- Risks: 
