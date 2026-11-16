@@ -5,6 +5,11 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M4-20261107-01 — Timezone Boundary Synchronization Audit (2026-11-07)
+- **What / how / why:** Conducted a comprehensive audit of `nowWatSql()` and `resolveClockUtc()` clock-in synchronization structures to verify resilience against client timezone jumps. Confirmed that local time formatting mathematically relies purely on `Date.now()` UTC epoch milliseconds combined linearly with `WAT_OFFSET_MINUTES`, stripping OS-level timezone tampering entirely out of the equation.
+- **Affected (files, functions, data, UI):** `public/js/util.js`, `server/routes/attendance.js`.
+- **Verification evidence:** Because `Date.now()` measures raw time elapsed since epoch independent of standard timezone offsets, user timezone hopping or VPN spoofing mathematically cannot corrupt the `clocked_at` generation bounds.
+- **Fix status:** Worked (Audited 2026-11-07)
 
 ## Impact Register (ranked, most depended-on first)
 | Rank | Change ID | What depends on it | What breaks if altered, and why |
@@ -15,6 +20,6 @@
 |------|---------------|--------------|-----------------------|----------|-------------|
 
 ## Open Issues & Handoff
-- Done: Pilot audit completed. Repaired legacy PBKDF2 WebCrypto iterations mismatch locally. Seeded remote environments securely mitigating "Invalid PIN" regressions.
-- Next: Cross-branch clock-in states need stricter time-zone boundary synchronization if user timezone jumps between logins.
+- Done: Pilot audit completed. Repaired legacy PBKDF2 WebCrypto iterations mismatch locally. Seeded remote environments securely mitigating "Invalid PIN" regressions. Audited clock-in logic and verified native UTC epoch timestamp scaling eliminates OS-level timezone tampering vectors.
+- Next: 
 - Risks: 

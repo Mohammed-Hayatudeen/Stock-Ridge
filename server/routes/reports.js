@@ -172,7 +172,7 @@ function mount(app, base = '/api') {
         transactions: Number(r.transactions) || 0,
         grossRevenue: gross, vat, netRevenue: net, cogs,
         grossMargin: margin,
-        grossMarginPct: net > 0 ? round2((margin / net) * 100) : 0,
+        grossMarginPct: net !== 0 ? round2((margin / net) * 100) : 0,
         discounts: round2(Number(r.discounts)),
         deliveryFees: round2(Number(r.delivery_fees)),
         outstanding: round2(Number(r.outstanding)),
@@ -202,7 +202,7 @@ function mount(app, base = '/api') {
       scope: useBranch
         ? { branch: (await db.first('SELECT name FROM branches WHERE id = ?', [useBranch]) || {}).name }
         : { business: namedBusiness ? namedBusiness.name : 'Every business you can reach' },
-      rows, totals: { ...totals, grossMarginPct: totals.netRevenue > 0 ? round2((totals.grossMargin / totals.netRevenue) * 100) : 0 },
+      rows, totals: { ...totals, grossMarginPct: totals.netRevenue !== 0 ? round2((totals.grossMargin / totals.netRevenue) * 100) : 0 },
       voided: { count: Number(voided.count) || 0, value: round2(Number(voided.value)) },
       vatRatePercent: vatRate,
       // Stated plainly because the single most common misreading of a Nigerian

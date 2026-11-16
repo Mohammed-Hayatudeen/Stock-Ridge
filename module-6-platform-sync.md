@@ -28,6 +28,6 @@
 |------|---------------|--------------|-----------------------|----------|-------------|
 
 ## Open Issues & Handoff
-- Done: Implemented missing `idx_clone_table_updated_at` indexing into SQLite Native Core. Executed read/write yield optimization to preserve Turso Free Tier limits via Global Revisions.
-- Next: Native Android IPC `readTimeout` logic requires continuous monitoring across variable cellular architectures to guarantee timeout boundaries do not preempt ongoing valid data synchronization fetches.
+- Done: Implemented missing `idx_clone_table_updated_at` indexing into SQLite Native Core. Executed read/write yield optimization to preserve Turso Free Tier limits via Global Revisions. Elevated native Android IPC and PWA fetch timeouts globally to 180,000ms.
+- Next: 
 - Risks: 
