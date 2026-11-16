@@ -1306,7 +1306,7 @@
                 vehicle_id: v.vehicle_id || null,
                 driver_user_id: v.driver_user_id || null,
                 items: items.map((item) => ({ id: item.id, quantity: Number(v[`qty_${item.id}`]) })),
-              });
+              }, { queue: 'auto' });
               ui.ok(result.message || 'Load attached.');
               m.close();
               if (after) after();
@@ -1589,7 +1589,7 @@
                   longitude: v.longitude || null,
                   transaction_note: v.transaction_note || null,
                   settlement: v.settlement || null,
-                });
+                }, { queue: 'auto' });
                 ui.ok(result.message || `Marked ${U.humanise(v.status).toLowerCase()}.`);
                 m.close();
                 if (after) after();
@@ -1651,7 +1651,7 @@
                   payment_method: v.payment_method || 'CASH',
                   notes: v.notes || null,
                   starts_warranty: wrapEl.querySelector('[name="starts_warranty"]').checked,
-                });
+                }, { queue: 'auto' });
                 ui.ok('Installation job created.');
                 m.close();
                 if (after) after();
@@ -1705,7 +1705,7 @@
                   payment_method: v.payment_method || 'CASH',
                   note: v.note || null,
                   starts_warranty: wrapEl.querySelector('[name="starts_warranty"]').checked,
-                });
+                }, { queue: 'auto' });
                 ui.ok(result.message || 'Installation completed.');
                 m.close();
                 if (after) after();

@@ -748,7 +748,7 @@
       const barcodes = await SR.store.all('product_barcodes').catch(() => []);
       const hit = barcodes.find((b) => !Number(b.is_deleted) && wants.has(String(b.barcode).toUpperCase()));
       if (hit) {
-        const product = await SR.store.get('products', hit.product_id);
+        const product = await SR.store.get('products', hit.product_id).catch(() => null);
         const found = withStock(product, { variantId: hit.variant_id || null, unitCode: hit.unit_code || null, units: hit.units, barcode: code });
         if (found) return found;
       }
@@ -766,7 +766,7 @@
         const serials = await SR.store.all('serial_numbers').catch(() => []);
         const serial = serials.find((s) => wants.has(String(s.serial_no).toUpperCase()));
         if (serial) {
-          const product = await SR.store.get('products', serial.product_id);
+          const product = await SR.store.get('products', serial.product_id).catch(() => null);
           const found = withStock(product, { serialNo: serial.serial_no, serialId: serial.id, unitCode: serial.unit_code || null, units: serial.units });
           if (found) return found;
         }
@@ -1763,7 +1763,7 @@
           const data = await SR.api.get('/api/customers', { query: SR.state.query({ q: q || undefined, limit: 25 }) });
           rows = data.data || [];
         } catch (err) {
-          rows = (await SR.store.all('customers', { where: (c) => !Number(c.is_deleted) }))
+          rows = (await SR.store.all('customers', { where: (c) => !Number(c.is_deleted) }).catch(() => []))
             .filter((c) => !q || `${c.name} ${c.phone || ''} ${c.company_name || ''}`.toLowerCase().includes(q.toLowerCase()))
             .slice(0, 25);
         }
