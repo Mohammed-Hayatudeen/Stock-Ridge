@@ -162,14 +162,14 @@ Report template:
 <I/>
 
 5. Knowledge files
-The knowledge files are the project's record across sessions: one per module, in docs/modules/.
-docs/modules/
-  m1-operations-pos.md
-  m2-inventory-supply-chain.md
-  m3-accounting-finance.md
-  m4-admin-hr-compliance.md
-  m5-fleet-delivery.md
-  m6-platform-sync.md
+The knowledge files are the project's record across sessions: one per module, at the root level.
+Root directory:
+  module-1-operations-pos.md
+  module-2-inventory-supply-chain.md
+  module-3-accounting-finance.md
+  module-4-admin-hr-compliance.md
+  module-5-fleet-delivery.md
+  module-6-platform-sync.md
 
 If a file is missing, create it from the template below before Step 3.
 
