@@ -1,14 +1,20 @@
-# Module 4: Admin, HR & Compliance (The "Governance" Module)
+# M4 — Admin, HR & Compliance ("Governance") · Knowledge file
 
-**Scope:** Internal rules, staff management, identity, and statutory requirements.
+## Protected Fixes
+| ID | Date | Symptom | Root cause | Fix (files / functions) | Regression check |
+|----|------|---------|------------|-------------------------|------------------|
 
-- **Identity & Roles (users.js, admin.js, auth.js):** Managing credentials (the PBKDF2 PINs), roles (Owner, Manager, Staff), and branch assignments.
-- **Attendance (attendance.js):** Clock-in/clock-out tracking for payroll.
-- **Compliance (compliance.js):** Managing regulatory rules (e.g., restricted pharmaceutical registrations, NAFDAC IDs, SONCAP, greenbook requirements).
+## Change Register
 
-## 🔎 Agent Audit Checkpoint & Module Dependencies
-- **Status:** PILOT AUDIT COMPLETED.
-- **Dependency Map:** Provides structural access control parameters governing all modules. Independent logic execution.
-- **Recent Weakness Addressed:** Repaired legacy PBKDF2 WebCrypto iterations mismatch locally. Seeded remote environments securely mitigating "Invalid PIN" regressions.
-- **Known Gaps / Action Items:** 
-  1. Cross-branch clock-in states need stricter time-zone boundary synchronization if user timezone jumps between logins.
+## Impact Register (ranked, most depended-on first)
+| Rank | Change ID | What depends on it | What breaks if altered, and why |
+|------|-----------|--------------------|---------------------------------|
+
+## Research Log
+| Date | Topic / query | Source + URL | Source date · version | Takeaway | How applied |
+|------|---------------|--------------|-----------------------|----------|-------------|
+
+## Open Issues & Handoff
+- Done: Pilot audit completed. Repaired legacy PBKDF2 WebCrypto iterations mismatch locally. Seeded remote environments securely mitigating "Invalid PIN" regressions.
+- Next: Cross-branch clock-in states need stricter time-zone boundary synchronization if user timezone jumps between logins.
+- Risks: 
