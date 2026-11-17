@@ -69,8 +69,8 @@ async function seedPinData(db) {
         totals.branchesPreserved += 1;
       } else {
         const id = newId();
-        await db.run(`INSERT INTO branches (id,business_id,name,code,branch_type,city,state,opening_cash,is_active,created_at,updated_at)
-          VALUES (?,?,?,?,'MIXED','Abuja','FCT',0,1,datetime('now'),datetime('now'))`,
+        await db.run(`INSERT INTO branches (id,business_id,name,code,branch_type,city,state,is_active,created_at,updated_at)
+          VALUES (?,?,?,?,'MIXED','Abuja','FCT',1,datetime('now'),datetime('now'))`,
         [id, business.id, name, `${definition.prefix.toUpperCase()}-${key === 'first' ? '1' : '2'}`]);
         branch = await db.first('SELECT * FROM branches WHERE id=?', [id]);
         totals.branchesCreated += 1;

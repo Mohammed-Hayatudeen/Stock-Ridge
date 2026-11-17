@@ -633,7 +633,7 @@ function postIntercompanyTransferStatements({ transfer, fromBusiness, toBusiness
 const SOURCE_TYPES = Object.freeze([
   'SALE', 'SALE_RETURN', 'PURCHASE', 'EXPENSE', 'STOCK_ADJUSTMENT', 'TRANSFER',
   'TILL', 'SAFE', 'DEBTOR_PAYMENT', 'CREDITOR_PAYMENT', 'WHT', 'VAT', 'DEPRECIATION',
-  'INSTALMENT', 'WARRANTY', 'DELIVERY', 'PAYROLL', 'MANUAL', 'OPENING_BALANCE', 'INTERCOMPANY',
+  'INSTALMENT', 'WARRANTY', 'DELIVERY', 'PAYROLL', 'MANUAL', 'INTERCOMPANY',
 ]);
 
 /**

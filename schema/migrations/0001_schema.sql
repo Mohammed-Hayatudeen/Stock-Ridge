@@ -134,7 +134,7 @@ CREATE TABLE branch_safe_ledger (
     branch_id     TEXT NOT NULL REFERENCES branches(id),
     business_id   TEXT NOT NULL REFERENCES businesses(id),
     entry_type    TEXT NOT NULL CHECK (entry_type IN (
-        'OPENING','DEPOSIT','WITHDRAWAL','BANKING','EXPENSE','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT','TILL_FUND','TILL_RETURN')),
+        'DEPOSIT','WITHDRAWAL','BANKING','EXPENSE','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT','TILL_FUND','TILL_RETURN')),
     amount        REAL NOT NULL,        -- + into the safe, - out of it
     balance_after REAL NOT NULL,
     reference_type TEXT,
@@ -177,7 +177,6 @@ CREATE TABLE "branches" (
     longitude   REAL,
     geofence_radius_meters INTEGER NOT NULL DEFAULT 100,
     attendance_mode TEXT NOT NULL DEFAULT 'GEOLOCATION' CHECK (attendance_mode IN ('GEOLOCATION','REGISTERED_DEVICE','BOTH','NONE')),
-    opening_cash REAL NOT NULL DEFAULT 0,
     is_active   INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -639,7 +638,7 @@ CREATE TABLE gl_journal_entries (
     source_type TEXT NOT NULL CHECK (source_type IN (
         'SALE','SALE_RETURN','PURCHASE','EXPENSE','STOCK_ADJUSTMENT','TRANSFER',
         'TILL','SAFE','DEBTOR_PAYMENT','CREDITOR_PAYMENT','WHT','VAT','DEPRECIATION',
-        'INSTALMENT','WARRANTY','DELIVERY','PAYROLL','MANUAL','OPENING_BALANCE','INTERCOMPANY')),
+        'INSTALMENT','WARRANTY','DELIVERY','PAYROLL','MANUAL','INTERCOMPANY')),
     source_id   TEXT,
     description TEXT,
     total_debit  REAL NOT NULL DEFAULT 0,
