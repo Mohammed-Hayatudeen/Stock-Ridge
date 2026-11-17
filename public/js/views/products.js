@@ -146,16 +146,7 @@
       const wrapEl = ui.h('div', {});
       wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'The name is what the catalogue shows. Pharmaceuticals and others are the same list. Products already in the category stay in it. A NAFDAC catalogue medicine stays pharmaceutical even if the category moves.'));
       wrapEl.appendChild(ui.h('div', { class: 'form-grid' },
-        ui.field({ label: 'Category name', name: 'name', value: category.name, required: true }),
-        ui.field({
-          label: 'Counts as',
-          name: 'selling_group',
-          value: sideOf(category),
-          options: [
-            { value: 'PHARMACEUTICALS', label: 'Pharmaceuticals' },
-            { value: 'NON_PHARMACEUTICALS', label: 'Others' },
-          ],
-        })));
+        ui.field({ label: 'Category name', name: 'name', value: category.name, required: true })));
       const m = ui.openModal({
         title: `Edit ${category.name}`,
         body: wrapEl,
@@ -170,7 +161,6 @@
               try {
                 const res = await SR.api.put(`/api/categories/${encodeURIComponent(category.id)}`, {
                   name: v.name.trim(),
-                  selling_group: v.selling_group,
                 }, { query: SR.state.query() });
                 ui.ok(res.message || `“${v.name.trim()}” saved.`);
                 m.close();
@@ -281,16 +271,7 @@
           value: SR.state.activeBusinessId || '',
           options: shops.map((shop) => ({ value: String(shop.id), label: shop.name || shop.code || 'Business' })),
         }) : null,
-        ui.field({ label: 'Category name', name: 'name', required: true }),
-        ui.field({
-          label: 'Counts as',
-          name: 'selling_group',
-          value: 'NON_PHARMACEUTICALS',
-          options: [
-            { value: 'PHARMACEUTICALS', label: 'Pharmaceuticals' },
-            { value: 'NON_PHARMACEUTICALS', label: 'Others' },
-          ],
-        })));
+        ui.field({ label: 'Category name', name: 'name', required: true })));
       const m = ui.openModal({
         title: 'Add a category',
         body: wrapEl,
@@ -305,7 +286,6 @@
               try {
                 const created = await SR.api.post('/api/categories', {
                   name: v.name.trim(),
-                  selling_group: v.selling_group,
                   business_id: v.business_id || SR.state.activeBusinessId,
                 });
                 m.close();
