@@ -52,45 +52,6 @@ function profileForBusiness(business) {
  * on the day it opened. Posted twice, the capital would double. A zero float
  * is a real choice and writes nothing.
  */
-async function recordOpeningFloat(db, { businessId, branchId, branchName, amount, userId }) {
-  const cash = round2(Number(amount) || 0);
-  if (!(cash > 0) || !businessId || !branchId) return { recorded: false, amount: 0, reason: 'none' };
-  const sourceId = `opening-${branchId}`;
-  const safeRow = await db.first(
-    `SELECT id FROM branch_safe_ledger WHERE branch_id = ? AND entry_type = 'OPENING' AND is_deleted = 0`,
-    [String(branchId)],
-  );
-  const journal = await db.first(
-    `SELECT id FROM gl_journal_entries WHERE source_type = 'OPENING_BALANCE' AND source_id = ? AND is_deleted = 0`,
-    [sourceId],
-  );
-  if (safeRow && journal) return { recorded: true, amount: cash, already: true };
-  if (!safeRow) {
-    await db.run(`INSERT INTO branch_safe_ledger (
-        id, branch_id, business_id, entry_type, amount, balance_after, reason, created_by, created_at, updated_at)
-      VALUES (?,?,?, 'OPENING', ?, ?, 'Opening cash float', ?, datetime('now'), datetime('now'))`,
-    [newId(), String(branchId), String(businessId), cash, cash, userId ? String(userId) : null]);
-  }
-  if (!journal) {
-    const accountIds = await glService.loadAccountCodes(db, businessId);
-    for (const st of glService.postCashAgainstAccountStatements({
-      businessId: String(businessId),
-      branchId: String(branchId),
-      amount: cash,
-      cash: 'SAFE',
-      direction: 'IN',
-      accountCode: '3000',
-      sourceType: 'OPENING_BALANCE',
-      sourceId,
-      description: `Opening cash float for ${branchName || 'this branch'}`,
-      accountIds,
-      user: userId ? { id: String(userId) } : null,
-    })) {
-      await db.run(st.sql, st.params);
-    }
-  }
-  return { recorded: true, amount: cash, already: false };
-}
 
 /**
  * Provision a business: categories, chart of accounts, customer classes and
@@ -646,13 +607,12 @@ async function provisionDeployment(db, {
     const id = newId();
     await db.run(`INSERT INTO branches (
         id, business_id, name, code, branch_type, address, city, state, lga, phone,
-        latitude, longitude, geofence_radius_meters, attendance_mode, opening_cash, is_active, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1, datetime('now'), datetime('now'))`, [
+        latitude, longitude, geofence_radius_meters, attendance_mode, is_active, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1, datetime('now'), datetime('now'))`, [
       id, businessId, b.name, b.code || `BR-${String(i + 1).padStart(2, '0')}`, b.branch_type || defaultBranchType(profileCode),
       b.address || null, b.city || null, b.state || null, b.lga || null, b.phone || null,
       b.latitude != null ? b.latitude : null, b.longitude != null ? b.longitude : null,
       Number(b.geofence_radius_meters || 100), b.attendance_mode || 'GEOLOCATION',
-      round2(Number(b.opening_cash) || 0),
     ]);
     branchIds.push(id);
 
@@ -706,4 +666,4 @@ async function provisionDeployment(db, {
   };
 }
 
-module.exports = { provisionBusiness, provisionDeployment, provisionPlatform, profileForBusiness, parseOverrides, variantCombinations, syntheticBarcode, variantSku, fileGreenbook, recordOpeningFloat, ensureWhtSchedule };
+module.exports = { provisionBusiness, provisionDeployment, provisionPlatform, profileForBusiness, parseOverrides, variantCombinations, syntheticBarcode, variantSku, fileGreenbook, ensureWhtSchedule };

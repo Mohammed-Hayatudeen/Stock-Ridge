@@ -354,8 +354,8 @@ function mount(app, base = '/api') {
       branchId = newId();
       await db.run(`INSERT INTO branches (
           id, business_id, name, code, branch_type, address, city, state, lga, phone, email,
-          latitude, longitude, geofence_radius_meters, attendance_mode, opening_cash, is_active, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 0, 1, datetime('now'), datetime('now'))`, [
+          latitude, longitude, geofence_radius_meters, attendance_mode, is_active, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 1, datetime('now'), datetime('now'))`, [
         branchId, id,
         branchRow.name, branchRow.code, branchRow.branch_type, branchRow.address, branchRow.city, branchRow.state, branchRow.lga,
         branchRow.phone, branchRow.email, branchRow.latitude, branchRow.longitude, branchRow.geofence_radius_meters,
@@ -557,8 +557,8 @@ function mount(app, base = '/api') {
     const radius = row.geofence_radius_meters;
     await db.run(`INSERT INTO branches (
         id, business_id, name, code, branch_type, address, city, state, lga, phone, email,
-        latitude, longitude, geofence_radius_meters, attendance_mode, opening_cash, is_active, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 0, 1, datetime('now'), datetime('now'))`, [
+        latitude, longitude, geofence_radius_meters, attendance_mode, is_active, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 1, datetime('now'), datetime('now'))`, [
       id, String(business.id),
       row.name, row.code, row.branch_type, row.address, row.city, row.state, row.lga,
       row.phone, row.email, row.latitude, row.longitude, row.geofence_radius_meters,

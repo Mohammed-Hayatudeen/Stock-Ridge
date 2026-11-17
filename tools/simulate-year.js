@@ -60,8 +60,8 @@ async function main() {
       for (let index = 0; index < item.branches.length; index += 1) {
         const branchId = newId();
         const branchName = item.branches[index];
-        await db.run(`INSERT INTO branches (id,business_id,name,code,branch_type,city,state,opening_cash,is_active,created_at,updated_at)
-          VALUES (?,?,?,?,?,'Abuja','FCT',50000,1,datetime('now'),datetime('now'))`,
+        await db.run(`INSERT INTO branches (id,business_id,name,code,branch_type,city,state,is_active,created_at,updated_at)
+          VALUES (?,?,?,?,?,'Abuja','FCT',1,datetime('now'),datetime('now'))`,
         [branchId, businessId, branchName, `BR-${index + 1}`, 'MIXED']);
         const branch = await db.first('SELECT * FROM branches WHERE id=?', [branchId]);
         record.branches.push(branch);
@@ -190,7 +190,7 @@ async function main() {
 
     const { runSpecialized } = require('./simulate-specialized');
     const specialized = await runSpecialized({
-      db, app, businesses, owner, settings, scope, secret, token,
+      db, app, businesses, owner, settings, scope: ownerScope, secret, token,
       setClock: (iso) => { clock = iso; },
     });
     errors.push(...specialized.errors);
