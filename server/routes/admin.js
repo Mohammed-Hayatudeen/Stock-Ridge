@@ -152,7 +152,6 @@ async function readBranchColumns(db, body, { nameFallback = null, exceptId = nul
     longitude: coords.lng,
     geofence_radius_meters: numField(body.geofence_radius_meters ?? 150, { field: 'Fence radius', min: 0, max: 50000, whole: true }),
     attendance_mode: valid(oneOf(body.attendance_mode || 'GEOLOCATION', ATTENDANCE_MODES, { field: 'Attendance mode' }), 'attendance_mode'),
-    opening_cash: numField(body.opening_cash, { field: 'Opening float', min: 0 }),
   };
 }
 const provisioning = require('../services/provisioningService');
@@ -356,11 +355,11 @@ function mount(app, base = '/api') {
       await db.run(`INSERT INTO branches (
           id, business_id, name, code, branch_type, address, city, state, lga, phone, email,
           latitude, longitude, geofence_radius_meters, attendance_mode, opening_cash, is_active, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 1, datetime('now'), datetime('now'))`, [
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 0, 1, datetime('now'), datetime('now'))`, [
         branchId, id,
         branchRow.name, branchRow.code, branchRow.branch_type, branchRow.address, branchRow.city, branchRow.state, branchRow.lga,
         branchRow.phone, branchRow.email, branchRow.latitude, branchRow.longitude, branchRow.geofence_radius_meters,
-        branchRow.attendance_mode, branchRow.opening_cash,
+        branchRow.attendance_mode,
       ]);
     } else {
       branchId = body.branch_id ? String(body.branch_id) : null;
@@ -373,19 +372,8 @@ function mount(app, base = '/api') {
       withCatalogue: seedCatalogue,
       createdBy: String(user.id),
     });
-    // The chart has to exist before the first money can be posted. The branch
-    // row alone is not the record: the safe and Owner's Capital both have to
-    // show it, or the shop opens with cash the books have never heard of.
+    
     let opening = { recorded: false, amount: 0 };
-    if (branchId && branchRow && Number(branchRow.opening_cash) > 0) {
-      opening = await provisioning.recordOpeningFloat(db, {
-        businessId: id,
-        branchId,
-        branchName: branchRow.name,
-        amount: branchRow.opening_cash,
-        userId: user.id,
-      });
-    }
 
     // THE SERVICE HANDS BACK THE SUMMARY ITSELF. `provisionBusiness` ends `return summary` — the
     // counts are the value, at `result.categories` / `result.accounts` / `result.products`. The
@@ -570,20 +558,13 @@ function mount(app, base = '/api') {
     await db.run(`INSERT INTO branches (
         id, business_id, name, code, branch_type, address, city, state, lga, phone, email,
         latitude, longitude, geofence_radius_meters, attendance_mode, opening_cash, is_active, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 1, datetime('now'), datetime('now'))`, [
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 0, 1, datetime('now'), datetime('now'))`, [
       id, String(business.id),
       row.name, row.code, row.branch_type, row.address, row.city, row.state, row.lga,
       row.phone, row.email, row.latitude, row.longitude, row.geofence_radius_meters,
-      row.attendance_mode, row.opening_cash,
+      row.attendance_mode,
     ]);
-    const opening = await provisioning.recordOpeningFloat(db, {
-      businessId: business.id,
-      branchId: id,
-      branchName: row.name,
-      amount: row.opening_cash,
-      userId: user.id,
-    });
-
+    
     // A new branch starts with NO stock: it does not inherit another branch's
     // shelves. Copying stock would create units in two places at once, and the
     // group's total inventory would silently double.
@@ -652,7 +633,6 @@ function mount(app, base = '/api') {
       }
       if (body.geofence_radius_meters !== undefined) { sets.push('geofence_radius_meters = ?'); params.push(numField(body.geofence_radius_meters, { field: 'Fence radius', min: 0, max: 50000, whole: true })); }
       if (body.attendance_mode !== undefined) { sets.push('attendance_mode = ?'); params.push(valid(oneOf(body.attendance_mode, ATTENDANCE_MODES, { field: 'Attendance mode' }), 'attendance_mode')); }
-      if (body.opening_cash !== undefined) { sets.push('opening_cash = ?'); params.push(numField(body.opening_cash, { field: 'Opening float', min: 0 })); }
       if (body.branch_type !== undefined) { sets.push('branch_type = ?'); params.push(valid(oneOf(body.branch_type, BRANCH_TYPES, { field: 'Branch type' }), 'branch_type')); }
       if (body.is_active !== undefined) {
         const active = boolField(body.is_active, 1);
