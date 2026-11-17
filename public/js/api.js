@@ -521,6 +521,11 @@
       [/^\/api\/deposits\/([^/]+)\/payments$/, 'POST', 'DEPOSIT_PAYMENT'],
       [/^\/api\/instalments\/([^/]+)\/payments$/, 'POST', 'INSTALMENT_PAYMENT'],
       [/^\/api\/expenses$/, 'POST', 'EXPENSE'],
+      [/^\/api\/tills\/open$/, 'POST', 'TILL_OPEN'],
+      [/^\/api\/tills\/([^/]+)\/close$/, 'POST', 'TILL_CLOSE'],
+      [/^\/api\/tills\/([^/]+)\/review$/, 'POST', 'TILL_REVIEW'],
+      [/^\/api\/safe\/entries$/, 'POST', 'SAFE_ENTRY'],
+      [/^\/api\/safe\/reconcile$/, 'POST', 'SAFE_RECONCILE'],
     ];
     for (const [re, m, type] of rules) {
       if (m !== method) continue;
