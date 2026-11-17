@@ -5,6 +5,12 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M2-20261107-02 — Product Category Field Refactoring (2026-11-07)
+- **What / how / why:** The category creation and edit modals contained an extraneous "Counts as" (`selling_group`) field meant to separate "Pharmaceuticals" from "Others". Because NAFDAC adoptions inherently bypass this manual UI via the fixed `PHARMACEUTICALS` category creation (`ensurePharmaceuticalCategory`) and the `U.sellingGroup()` logic uses `nafdac_catalog_id` directly, the manual UI field was redundant and mathematically ignored on the backend. Removed `selling_group` entirely from the product view modals to satisfy the strict two-field constraint (Business Vertical + Category Name).
+- **Affected (files, functions, data, UI):** `public/js/views/products.js` (`createCategory`, `editCategory`).
+- **Verification evidence:** UI now restricts category creation strictly to Business Vertical and Name. NAFDAC products seamlessly retain their "Pharmaceuticals" label because `U.sellingGroup(row)` inherently detects `nafdac_catalog_id` independent of any manual category flags.
+- **Fix status:** Worked (2026-11-07)
+
 ### M2-20261107-01 — Strict Negative Stock Remote Validation Locks (2026-11-07)
 - **What / how / why:** Discovered that heavy concurrent transaction volume could force `stock_batches` into negative quantities or negative available stock (quantity - reserved). Because Turso executes queued UPDATE statements within an atomic transaction without throwing application errors if 0 rows are affected (due to a failed WHERE clause `quantity - reserved >= ?`), race-condition sales were succeeding without deducting stock. Created migration `0005_strict_stock_locking.sql` implementing a `BEFORE UPDATE` trigger on `stock_batches` that executes a `RAISE(ABORT)` constraint if quantity drops below zero, strictly enforcing remote validation locks at the SQLite engine layer.
 - **Affected (files, functions, data, UI):** `schema/migrations/0005_strict_stock_locking.sql` (Database Engine layer), `server/routes/sales.js`.
