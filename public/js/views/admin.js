@@ -68,14 +68,6 @@
       disabled: lockIdentity,
       hint: 'Rental services is a yard. Goods go out on hire or lease and come back. The fee is income. The deposit is held. A retail counter sells the unit and takes the cost.',
     }));
-    identity.appendChild(ui.field({
-      label: 'Opening float (₦)',
-      name: n('opening_cash'),
-      type: 'number', step: '0.01', min: '0',
-      value: v.opening_cash == null || v.opening_cash === '' ? '' : String(v.opening_cash),
-      disabled: lockIdentity,
-      hint: 'Recorded as the safe\'s opening entry, so the safe balance is a real derivation rather than a number that appears the first time somebody deposits.',
-    }));
     identity.appendChild(ui.field({ label: 'Address', name: n('address'), span: true, value: v.address || '', disabled: lockIdentity }));
     identity.appendChild(ui.field({ label: 'City', name: n('city'), value: v.city || '' }));
     identity.appendChild(ui.field({ label: 'State', name: n('state'), value: v.state || '', disabled: lockIdentity }));
@@ -398,7 +390,7 @@
           if (k === 'business_label') continue;
           if (k === 'code') { payload[k] = val === null || val === '' ? null : val; continue; }
           if (k === 'is_active') { payload[k] = Boolean(Number(val)); continue; }
-          if (['latitude', 'longitude', 'geofence_radius_meters', 'opening_cash'].includes(k)) {
+          if (['latitude', 'longitude', 'geofence_radius_meters'].includes(k)) {
             payload[k] = val === null ? null : Number(val);
             continue;
           }
@@ -630,7 +622,6 @@
                   lga: v.branch_lga || undefined,
                   phone: v.branch_phone || v.contact_phone || undefined,
                   email: v.branch_email || v.contact_email || undefined,
-                  opening_cash: v.branch_opening_cash === null ? 0 : Number(v.branch_opening_cash),
                   latitude: v.branch_latitude,
                   longitude: v.branch_longitude,
                   geofence_radius_meters: v.branch_geofence_radius_meters === null ? 150 : Number(v.branch_geofence_radius_meters),

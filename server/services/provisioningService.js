@@ -669,12 +669,6 @@ async function provisionDeployment(db, {
     // DR Cash in Safe / CR Owner's Capital: the owner put the money in. That is what an
     // opening float IS, and it belongs in equity rather than in the trading accounts —
     // an opening float posted as income would show a profit on the day a shop opened.
-    if (Number(b.opening_cash) > 0) {
-      await recordOpeningFloat(db, {
-        businessId, branchId: id, branchName: b.name,
-        amount: b.opening_cash, userId: ownerId,
-      });
-    }
 
     // A branch manager per branch, when the caller asked for one.
     if (b.manager && b.manager.username && b.manager.pin) {
