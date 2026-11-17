@@ -103,6 +103,11 @@ const REPLAYABLE = {
   DEPOSIT_PAYMENT: { method: 'POST', path: '/api/deposits/:id/payments' },
   INSTALMENT_PAYMENT: { method: 'POST', path: '/api/instalments/:id/payments' },
   EXPENSE: { method: 'POST', path: '/api/expenses' },
+  TILL_OPEN: { method: 'POST', path: '/api/tills/open' },
+  TILL_CLOSE: { method: 'POST', path: '/api/tills/:id/close' },
+  TILL_REVIEW: { method: 'POST', path: '/api/tills/:id/review' },
+  SAFE_ENTRY: { method: 'POST', path: '/api/safe/entries' },
+  SAFE_RECONCILE: { method: 'POST', path: '/api/safe/reconcile' },
 };
 
 function mount(app, base = '/api') {

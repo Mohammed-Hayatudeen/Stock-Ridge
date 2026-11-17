@@ -320,17 +320,19 @@
         if (v.opening_cash === null) { ui.warn('Enter the float you are starting with.'); return; }
         await ui.withBusy(form, async () => {
           try {
+            const locId = SR.util.localId('till');
             const res = await SR.api.post('/api/tills/open', {
+              id: locId,
               opening_cash: Number(v.opening_cash) || 0,
               from_safe: Number(v.from_safe) ? true : undefined,
               notes: v.notes || undefined,
               branch_id: SR.state.activeBranchId,
-            }, { idempotencyKey: SR.util.localId('till-open') });
+            }, { queue: 'auto', idempotencyKey: SR.util.localId('till-open') });
             const opened = res && res.id
               ? await SR.api.get('/api/tills/' + encodeURIComponent(res.id), { timeoutMs: 180000 }).catch(() => null)
               : null;
             const saved = (opened && opened.till) || {
-              id: res && res.id,
+              id: (res && res.id) || locId,
               branch_id: SR.state.activeBranchId,
               business_id: SR.state.activeBusinessId,
               user_id: SR.state.user && SR.state.user.id,
@@ -404,7 +406,16 @@
               bank_amount: v.bank_amount === null ? undefined : Number(v.bank_amount),
               bank_reference: v.bank_reference || undefined,
               to_safe: v.to_safe === null ? undefined : Number(v.to_safe),
-            });
+            }, { queue: 'auto' });
+            if (res && res.queued) {
+              const localT = await SR.store.get('till_sessions', t.id);
+              if (localT) {
+                localT.status = 'CLOSED';
+                localT.closed_at = new Date().toISOString();
+                localT.counted_cash = Number(v.counted_cash);
+                await SR.store.put('till_sessions', localT);
+              }
+            }
             m.close();
             const payload = res && (res.message || res);
             ui.ok(typeof payload === 'string' ? payload : 'Till closed and counted.');
@@ -476,7 +487,9 @@
         const outgoing = ['WITHDRAWAL', 'EXPENSE', 'BANKING'].includes(String(v.entry_type));
         await ui.withBusy(form, async () => {
           try {
+            const locId = SR.util.localId('safe');
             const res = await SR.api.post('/api/safe/entries', {
+              id: locId,
               entry_type: v.entry_type,
               amount: Number(v.amount),
               outgoing,
@@ -486,7 +499,7 @@
               reference: v.reference || undefined,
               note: v.note || undefined,
               branch_id: SR.state.activeBranchId,
-            }, { idempotencyKey: SR.util.localId('safe') });
+            }, { queue: 'auto', idempotencyKey: locId });
             m.close();
             ui.ok(res.message || `Safe balance is now ${U.money(res.balanceAfter)}.`);
             load();
@@ -517,11 +530,13 @@
         if (!String(v.note || '').trim()) { ui.warn('Say why the books were out — the note is the record.'); return; }
         await ui.withBusy(form, async () => {
           try {
+            const locId = SR.util.localId('safe');
             const res = await SR.api.post('/api/safe/reconcile', {
+              id: locId,
               counted_balance: v.counted_balance === null ? undefined : Number(v.counted_balance),
               note: v.note,
               branch_id: SR.state.activeBranchId,
-            });
+            }, { queue: 'auto', idempotencyKey: locId });
             m.close();
             ui.ok(res.message || 'Safe reconciled.');
             loadSafe();
@@ -784,7 +799,15 @@
         if (!accepted && !(v.note || '').trim()) { ui.warn('Say why the count is being rejected.'); return; }
         await ui.withBusy(form, async () => {
           try {
-            const res = await SR.api.post(`/api/tills/${encodeURIComponent(t.id)}/review`, { accepted, note: v.note || undefined });
+            const res = await SR.api.post(`/api/tills/${encodeURIComponent(t.id)}/review`, { accepted, note: v.note || undefined }, { queue: 'auto' });
+            if (res && res.queued) {
+              const localT = await SR.store.get('till_sessions', t.id);
+              if (localT) {
+                localT.reviewed_ok = accepted ? 1 : 0;
+                localT.review_note = v.note || undefined;
+                await SR.store.put('till_sessions', localT);
+              }
+            }
             m.close();
             ui.ok(res.message || 'Recorded.');
             load();

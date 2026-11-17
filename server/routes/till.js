@@ -226,7 +226,7 @@ function mount(app, base = '/api') {
 
     const openingCash = numField(body.opening_cash ?? body.openingCash ?? branch.opening_cash ?? 0, { field: 'Opening float', min: 0 });
     const deviceId = strField(body.device_id || body.deviceId || ctx.req.header('X-Device-Id'), { field: 'Device', maxLength: 120 });
-    const id = newId();
+    const id = body.id || newId();
     const accountIds = await glService.loadAccountCodes(db, business.id);
 
     // The float's SOURCE. Money moved out of the safe into a drawer is not new
@@ -667,7 +667,7 @@ function mount(app, base = '/api') {
     // `difference` is what the BOOKS must move by. Positive means the safe holds
     // more than the books believe, which debits Cash in Safe and credits over &
     // short — the same shape as an overage at a till count, because it is one.
-    const id = newId();
+    const id = body.id || newId();
     const accountIds = await glService.loadAccountCodes(db, business.id);
     await db.transaction(async (tx) => {
       for (const st of glService.postCashOverShortStatements({
@@ -784,7 +784,7 @@ function mount(app, base = '/api') {
       throw new HttpError('A bank deposit needs its slip number, or it cannot be matched to the statement.', { status: 400, code: 'REFERENCE_REQUIRED' });
     }
 
-    const id = newId();
+    const id = body.id || newId();
     const accountIds = await glService.loadAccountCodes(db, business.id);
     const approvedBy = atLeast(user.role, 'MANAGER') ? String(user.id) : null;
 
@@ -952,7 +952,7 @@ function mount(app, base = '/api') {
     // ledger entry, not by inventing a status the CHECK constraint will refuse.
     const status = needsApproval ? 'PENDING_APPROVAL' : 'APPROVED';
 
-    const id = newId();
+    const id = body.id || newId();
     const accountIds = await glService.loadAccountCodes(db, business.id);
     const expenseRow = {
       id, category, description, amount, vat_amount: vatInput, wht_code: whtResolvedCode,
