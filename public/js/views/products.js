@@ -262,15 +262,23 @@
     async function addCategory() {
       const wrapEl = ui.h('div', {});
       const shops = (SR.state.businesses && SR.state.businesses()) || [];
-      const canPickShop = shops.length > 1 && (SR.state.atLeast && SR.state.atLeast('OWNER'));
-      wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'One list. A NAFDAC medicine stays pharmaceutical. Provisions, drinks and the other categories sit on the same list. The category is filed on the business you name.'));
+      const verticals = [];
+      const seenProfiles = new Set();
+      for (const s of shops) {
+        const p = s.profile_code || 'RETAIL';
+        if (!seenProfiles.has(p)) {
+          seenProfiles.add(p);
+          verticals.push({ value: String(s.id), label: SR.util.humanise(p) });
+        }
+      }
+      wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'One list. A NAFDAC medicine stays pharmaceutical. The category is filed across all businesses in the vertical you choose.'));
       wrapEl.appendChild(ui.h('div', { class: 'form-grid' },
-        canPickShop ? ui.field({
-          label: 'Business',
+        ui.field({
+          label: 'Business Vertical',
           name: 'business_id',
           value: SR.state.activeBusinessId || '',
-          options: shops.map((shop) => ({ value: String(shop.id), label: shop.name || shop.code || 'Business' })),
-        }) : null,
+          options: verticals,
+        }),
         ui.field({ label: 'Category name', name: 'name', required: true })));
       const m = ui.openModal({
         title: 'Add a category',
