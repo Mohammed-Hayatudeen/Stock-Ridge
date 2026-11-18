@@ -43,11 +43,15 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private String hideScript = "";
+    private String originHost = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         hideScript = readAsset("hide-install.js");
+        Uri originUri = Uri.parse(getString(R.string.stockridge_origin));
+        originHost = originUri.getHost() == null ? "" : originUri.getHost();
+        
         webView = new WebView(this);
         setContentView(webView);
         WebSettings settings = webView.getSettings();
@@ -173,7 +177,7 @@ public class MainActivity extends Activity {
             Uri uri = request.getUrl();
             if (!"https".equalsIgnoreCase(uri.getScheme())) return null;
             String host = uri.getHost() == null ? "" : uri.getHost();
-            if (!host.endsWith("stockridge.workers.dev")) return null;
+            if (!host.equals(originHost)) return null;
             String path = uri.getPath() == null ? "/" : uri.getPath();
             // Shop answers are never stored on the phone. A cached sale total is a lie.
             if (path.startsWith("/api/")) return null;
