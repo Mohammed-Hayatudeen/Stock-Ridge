@@ -17,6 +17,12 @@
 - **Verification evidence:** Checked against Turso transaction behavior; `RAISE(ABORT)` guarantees absolute atomic rollback of the entire HTTP batch transaction if stock falls below limits.
 - **Fix status:** Worked (2026-11-07)
 
+### M2-20261118-01 — Simplified Product Category Creation (2026-11-18)
+- **What / how / why:** To enforce allocated entity limits and simplify the UI, the Product Category creation flow was updated to exactly two fields: "Business Vertical" and "Category Name". The frontend previously asked for a specific "Business", creating cognitive dissonance because categories are actually replicated across the entire Business Vertical (`profile_code`). Mapped the input strictly to available verticals and updated the descriptor to ensure NAFDAC catalogues strictly align automatically with the Pharmaceutical vertical without breaking downstream flows.
+- **Affected (files, functions, data, UI):** `public/js/views/products.js`.
+- **Verification evidence:** The `addCategory` UI now strictly displays only exactly two fields ("Business Vertical" and "Category Name"). 
+- **Fix status:** Worked (2026-11-18)
+
 ## Impact Register (ranked, most depended-on first)
 | Rank | Change ID | What depends on it | What breaks if altered, and why |
 |------|-----------|--------------------|---------------------------------|
