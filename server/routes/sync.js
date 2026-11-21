@@ -1196,6 +1196,16 @@ const PULLABLE = {
   change_owed: { businessScoped: true, branchScoped: true, orderBy: 'created_at' },
   till_sessions: { businessScoped: true, branchScoped: true, orderBy: 'opened_at' },
   serial_numbers: { businessScoped: false, branchScoped: true, orderBy: 'serial_no' },
+  expenses: { businessScoped: true, branchScoped: true, orderBy: 'expense_date DESC' },
+  delivery_vehicles: { businessScoped: true, branchScoped: true, orderBy: 'name' },
+  stock_transfers: { businessScoped: false, branchScoped: false, orderBy: 'created_at DESC' },
+  stock_transfer_items: { businessScoped: false, branchScoped: false, orderBy: 'updated_at', parent: { table: 'stock_transfers', column: 'transfer_id' } },
+  stocktake_sessions: { businessScoped: true, branchScoped: true, orderBy: 'created_at DESC' },
+  stocktake_lines: { businessScoped: false, branchScoped: false, orderBy: 'updated_at', parent: { table: 'stocktake_sessions', column: 'stocktake_id' } },
+  asset_agreements: { businessScoped: true, branchScoped: true, orderBy: 'starts_on DESC' },
+  asset_agreement_lines: { businessScoped: false, branchScoped: false, orderBy: 'created_at', parent: { table: 'asset_agreements', column: 'agreement_id' } },
+  warranty_claims: { businessScoped: true, branchScoped: true, orderBy: 'created_at DESC' },
+  staff_attendance: { businessScoped: true, branchScoped: true, orderBy: 'clock_in_at DESC' },
 };
 
 /** Strip anything a device should not carry around. */

@@ -37,6 +37,7 @@
     'branch_compliance_records', 'branch_safe_ledger',
     'sales', 'sale_items', 'sale_payments', 'sale_serials', 'sale_returns', 'sale_return_items',
     'customer_bills', 'bill_holds', 'sale_issues', 'change_owed', 'till_sessions', 'serial_numbers',
+    'expenses', 'delivery_vehicles', 'stock_transfers', 'stocktake_sessions', 'asset_agreements', 'asset_agreement_lines', 'warranty_claims', 'staff_attendance', 'stock_transfer_items', 'stocktake_lines'
   ];
   const SALES_TABLES = ['sales', 'sale_items', 'sale_payments', 'sale_serials', 'sale_returns', 'sale_return_items', 'customer_bills', 'bill_holds', 'sale_issues', 'change_owed', 'till_sessions', 'serial_numbers'];
 

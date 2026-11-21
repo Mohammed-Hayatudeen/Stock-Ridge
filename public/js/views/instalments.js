@@ -516,7 +516,7 @@
                   reference: v.reference || null,
                   notes: v.notes || null,
                   accept_expired: Boolean(wrapEl.querySelector('[name="accept_expired"]') && wrapEl.querySelector('[name="accept_expired"]').checked),
-                });
+                }, { queue: 'auto' });
                 ui.ok(result.message || 'Payment recorded.');
                 m.close();
                 load();
@@ -641,7 +641,7 @@
                   method: v.method,
                   reference: v.reference || null,
                   notes: v.notes || null,
-                }, { queue: false });
+                }, { queue: 'auto' });
                 ui.ok(result.message || 'Payment received.');
                 m.close();
                 load();
@@ -828,7 +828,7 @@
             try {
               const result = await SR.api.post(`/api/instalments/${encodeURIComponent(plan.id)}/payments`, {
                 amount: Number(v.amount), method: v.method, reference: v.reference || null, notes: v.notes || null,
-              }, { queue: false });
+              }, { queue: 'auto' });
               ui.ok(result.message || 'Payment received.');
               m.close();
               if (after) after();
