@@ -223,3 +223,16 @@ Before ending with <I/>, confirm every line is true:
 [ ] Every invariant in §2.1 is intact, and offline fallbacks still work.
 [ ] Knowledge files are updated (Change Register, Impact Register, Protected Fixes, Research Log, handoff) and contain no secrets.
 [ ] The report follows §4.
+8. Build Commands
+The following are the designated command lines required to securely compile the native and desktop applications. Verify the working tree is clean (`git pull origin main`) and dependencies are installed (`npm ci`) prior to running these.
+
+Android Build Commands (Output: `android/app/build/outputs/apk/`)
+- Compile Debug APK: `npm run android:build`
+- Compile Release APK (Unsigned): `npm run android:build:release`
+- Compile and auto-install via ADB: `npm run android:install`
+
+Electron Desktop Build Commands (Output: `dist/`)
+- Auto-Detect System (Builds for current OS): `npm run electron:build`
+- Windows (Portable Directory): `npm run electron:build:win`
+- Linux (AppImage): `npm run electron:build:linux`
+- macOS (DMG & Zip): `npm run electron:build:mac`
