@@ -3783,3 +3783,273 @@ WHERE b.is_deleted = 0
     WHERE c.business_id = b.id AND c.code = v.code AND c.is_deleted = 0
   );
 
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_expenses_ins
+AFTER INSERT ON expenses
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('expenses', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_expenses_upd
+AFTER UPDATE ON expenses
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('expenses', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_expenses_del
+AFTER DELETE ON expenses
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('expenses', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_delivery_vehicles_ins
+AFTER INSERT ON delivery_vehicles
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('delivery_vehicles', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_delivery_vehicles_upd
+AFTER UPDATE ON delivery_vehicles
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('delivery_vehicles', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_delivery_vehicles_del
+AFTER DELETE ON delivery_vehicles
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('delivery_vehicles', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stock_transfers_ins
+AFTER INSERT ON stock_transfers
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stock_transfers', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stock_transfers_upd
+AFTER UPDATE ON stock_transfers
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stock_transfers', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stock_transfers_del
+AFTER DELETE ON stock_transfers
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stock_transfers', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stock_transfer_items_ins
+AFTER INSERT ON stock_transfer_items
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stock_transfer_items', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stock_transfer_items_upd
+AFTER UPDATE ON stock_transfer_items
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stock_transfer_items', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stock_transfer_items_del
+AFTER DELETE ON stock_transfer_items
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stock_transfer_items', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stocktake_sessions_ins
+AFTER INSERT ON stocktake_sessions
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stocktake_sessions', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stocktake_sessions_upd
+AFTER UPDATE ON stocktake_sessions
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stocktake_sessions', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stocktake_sessions_del
+AFTER DELETE ON stocktake_sessions
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stocktake_sessions', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stocktake_lines_ins
+AFTER INSERT ON stocktake_lines
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stocktake_lines', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stocktake_lines_upd
+AFTER UPDATE ON stocktake_lines
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stocktake_lines', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_stocktake_lines_del
+AFTER DELETE ON stocktake_lines
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('stocktake_lines', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_asset_agreements_ins
+AFTER INSERT ON asset_agreements
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('asset_agreements', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_asset_agreements_upd
+AFTER UPDATE ON asset_agreements
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('asset_agreements', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_asset_agreements_del
+AFTER DELETE ON asset_agreements
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('asset_agreements', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_asset_agreement_lines_ins
+AFTER INSERT ON asset_agreement_lines
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('asset_agreement_lines', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_asset_agreement_lines_upd
+AFTER UPDATE ON asset_agreement_lines
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('asset_agreement_lines', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_asset_agreement_lines_del
+AFTER DELETE ON asset_agreement_lines
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('asset_agreement_lines', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_warranty_claims_ins
+AFTER INSERT ON warranty_claims
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('warranty_claims', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_warranty_claims_upd
+AFTER UPDATE ON warranty_claims
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('warranty_claims', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_rev_warranty_claims_del
+AFTER DELETE ON warranty_claims
+BEGIN
+  INSERT INTO sync_revisions (table_name, revision, updated_at)
+  VALUES ('warranty_claims', 1, datetime('now'))
+  ON CONFLICT(table_name) DO UPDATE SET
+    revision = revision + 1,
+    updated_at = datetime('now');
+END;

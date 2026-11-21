@@ -72,7 +72,7 @@
         known = Boolean(mine && mine.clock_in_at && !mine.clock_out_at);
       } catch (err) {
         try {
-          const all = await SR.store.all('attendance', { where: (a) => !Number(a.is_deleted) });
+          const all = await SR.store.all('staff_attendance', { where: (a) => !Number(a.is_deleted) });
           const mine = all.find((a) => String(a.user_id) === String(me.id) && a.clock_in_at && !a.clock_out_at);
           known = Boolean(mine && mine.clock_in_at && !mine.clock_out_at);
         } catch (e) {

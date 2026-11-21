@@ -347,7 +347,7 @@
           }
           if (!counts.length) { ui.warn('Type at least one count.'); return; }
           try {
-            const res = await SR.api.post(`/api/stocktakes/${encodeURIComponent(id)}/counts`, { counts });
+            const res = await SR.api.post(`/api/stocktakes/${encodeURIComponent(id)}/counts`, { counts }, { queue: 'auto' });
             ui.ok(res.message || 'Counts saved.');
             pending.clear();
             await load();
