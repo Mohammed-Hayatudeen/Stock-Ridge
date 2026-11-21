@@ -35,3 +35,5 @@
 - Done: Pilot audit completed. Repaired legacy PBKDF2 WebCrypto iterations mismatch locally. Seeded remote environments securely mitigating "Invalid PIN" regressions. Audited clock-in logic and verified native UTC epoch timestamp scaling eliminates OS-level timezone tampering vectors.
 - Next: 
 - Risks: 
+
+- **Cross-Reference:** M6-20261121-01 (Attendance IndexedDB table mappings corrected and sync gap resolved).

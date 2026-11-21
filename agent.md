@@ -102,7 +102,7 @@ A. Understand (Steps 1–3)
 Step 1 — Identify the modules, then understand the prompt. Identify all six modules and how they relate (§1–§2). Then restate the request in your own words: the goal or symptom, expected versus actual behaviour, and any constraints.
 Output: a one-to-three-sentence problem statement.
 
-Step 2 — Map the prompt to its modules. Name one primary module and every secondary module the dependency matrix links to it: providers it reads from, consumers it feeds, and M4 or M6 whenever roles or persistence are involved. Give a reason for each.
+Step 2 — Map the prompt to its modules. Name one primary module and every secondary module the dependency matrix links to it: providers it reads from, consumers it feeds, and M4 or M6 whenever roles or persistence are involved. Give a reason for each. also make sure like during running full audit when identifying issues always relate back to the  six modules to understand what was done before doing  or fixing any thing and also document.
 Output: Primary: M# · Secondary: M#, M# — reason.
 
 Step 3 — Read and understand the mapped modules. Read each mapped module's knowledge file first (§5), then the relevant source files in full, not only the lines that look relevant. Trace the real path from entry point to persistence: functions called, SR.state reads and writes, store/sync touchpoints, and who calls into this code from other modules. Change nothing yet.
