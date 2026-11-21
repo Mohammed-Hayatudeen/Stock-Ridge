@@ -31,3 +31,9 @@
 - Done: Implemented missing `idx_clone_table_updated_at` indexing into SQLite Native Core. Executed read/write yield optimization to preserve Turso Free Tier limits via Global Revisions. Elevated native Android IPC and PWA fetch timeouts globally to 180,000ms.
 - Next: 
 - Risks: 
+
+### M6-20261121-01 — Comprehensive offline audit and gap resolution (2026-11-21)
+- **What / how / why:** Background pull engine completely excluded 10 critical tables (`expenses`, `delivery_vehicles`, `asset_agreements`, `stocktake_sessions`, `staff_attendance`, `warranty_claims`, `stock_transfers`, `stock_transfer_items`, `stocktake_lines`, `asset_agreement_lines`). Integrated them into `PULLABLE` (`server/routes/sync.js`) and `PULL_TABLES` (`public/js/sync.js`). Created SQLite triggers for offline delta tracking. Injected `{ queue: 'auto' }` into stocktake counts and deposit/instalment payments. Fixed invalid IndexedDB table reference for `staff_attendance` in `attendance.js`.
+- **Affected (files, functions, data, UI):** `schema/migrations/0001_schema.sql`, `server/routes/sync.js`, `public/js/sync.js`, `public/js/views/stocktake.js`, `public/js/views/instalments.js`, `public/js/views/attendance.js`.
+- **Verification evidence:** Validated `npm test` checks. Added triggers are present in SQLite schema. Sync now natively buffers offline deposits/stocktakes.
+- **Fix status:** Worked (2026-11-21)

@@ -23,3 +23,5 @@
 - Done: Pilot audit completed. Resolved ReferenceErrors missing columns (`todayspan`, `branch_safe_ledger`). Safely isolated Gross Margin percentage math against `zero-division / NaN`. Implemented negative aggregate bounds tracking for margin percentages on enterprise queries.
 - Next: 
 - Risks: 
+
+- **Cross-Reference:** M6-20261121-01 (Expenses table added to offline sync schema).
