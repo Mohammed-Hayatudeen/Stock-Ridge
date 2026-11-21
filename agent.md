@@ -223,8 +223,9 @@ Before ending with <I/>, confirm every line is true:
 [ ] Every invariant in §2.1 is intact, and offline fallbacks still work.
 [ ] Knowledge files are updated (Change Register, Impact Register, Protected Fixes, Research Log, handoff) and contain no secrets.
 [ ] The report follows §4.
+
 8. Build Commands
-The following are the designated command lines required to securely compile the native and desktop applications. Verify the working tree is clean (`git pull origin main`) and dependencies are installed (`npm ci`) prior to running these.
+The following are the designated command lines required to securely compile the native and desktop applications.
 
 Android Build Commands (Output: `android/app/build/outputs/apk/`)
 - Compile Debug APK: `npm run android:build`
