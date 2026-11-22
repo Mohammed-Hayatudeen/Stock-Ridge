@@ -2430,12 +2430,13 @@
         }
       }
     }
+    let reachable = SR.api.isOnline();
     if (!restored) {
       const till = readTill();
       // A Wi-Fi icon is not the shop. The desktop proxy also answers HTTP when
       // the Worker is down, so the shop has to be asked before the login form
       // is treated as the only door.
-      const reachable = await SR.api.probe({ force: true });
+      reachable = await SR.api.probe({ force: true });
       if (!reachable && till && till.remember) {
         restored = Boolean(await SR.state.loadFromMirror());
       }
@@ -2443,7 +2444,10 @@
 
     // 4. a look at the server, either way
     setBootLine(restored ? 'Syncing…' : 'Looking for the server…', 70);
-    const reachable = await SR.api.probe({ force: true });
+    // If not restored, we already probed above. If restored, probe now.
+    if (restored) {
+      reachable = await SR.api.probe({ force: true });
+    }
     // Bind before the first cycle. A cycle that starts first paints Syncing
     // and Saving into a listener that is not there yet, and the chips stay blank.
     if (!SR._syncChromeBound) {
@@ -2454,7 +2458,7 @@
     }
     if (restored && reachable) {
       startSync();
-      await SR.sync.runOnce({ silent: true }).catch(() => {});
+      SR.sync.runOnce({ silent: true }).catch(() => {});
     } else if (restored) {
       startSync(); // it will fire the moment the line returns
     }

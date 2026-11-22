@@ -207,7 +207,7 @@
       const controller = new AbortController();
       const timer = setTimeout(() => {
         try { controller.abort(new DOMException('The server did not answer in time.', 'AbortError')); } catch (e) { controller.abort(); }
-      }, 180000);
+      }, 8000);
       try {
         // /api/health is a real shop answer. The ping route is a 404, which
         // still proves the shop spoke, but health is the clearer check.
