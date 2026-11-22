@@ -22,7 +22,7 @@ async function run() {
   const authToken = process.env.TURSO_AUTH_TOKEN;
   if (!url || !authToken) throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required.');
   
-  const db = createTursoDatabase({ url, authToken, name: 'stock2' });
+  const db = createTursoDatabase({ url, authToken, name: process.env.DB_NAME || 'stockridge' });
 
   console.log('🚀 FORMATTING TURSO DATABASE (Wiping Users, Businesses, Branches, Access)...');
 

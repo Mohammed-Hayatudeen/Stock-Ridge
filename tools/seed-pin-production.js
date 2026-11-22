@@ -122,7 +122,7 @@ async function main() {
   const url = process.env.TURSO_DATABASE_URL;
   const authToken = process.env.TURSO_AUTH_TOKEN;
   if (!url || !authToken) throw new Error('The authenticated GitHub Actions Turso environment is required.');
-  const db = createTursoDatabase({ url, authToken, name: 'stock2' });
+  const db = createTursoDatabase({ url, authToken, name: process.env.DB_NAME || 'stockridge' });
   const result = await seedPinData(db);
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;

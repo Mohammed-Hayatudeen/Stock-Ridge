@@ -17,6 +17,12 @@
 - **Verification evidence:** Live deployment polling confirms >95% reduction in read output during idle states.
 - **Fix status:** Worked (2026-11-11)
 
+### M6-20261121-02 — Hardcoded database and domain fix (2026-11-21)
+- **What / how / why:** Discovered `name: 'stock2'` hardcoded in multiple `createTursoDatabase` initialization scripts (`tools/check-db.js`, `tools/format-db.js`, `tools/reset-db.js`, `tools/seed-pin-production.js`, `tools/seed-test-accounts.js`, `tools/turso-admin.js`, and `.github/workflows/diagnose-db.yml`). Replaced with `process.env.DB_NAME || 'stockridge'` to dynamically respect the configured environment (preventing multi-client deployments from mis-assigning). Also discovered `electron/main.js` rigidly checked certificate validation against `.stockridge.workers.dev` directly, causing `beta.stockridge0.workers.dev` to fail with `ERR_CERT_AUTHORITY_INVALID`. Patched the hook to dynamically allow `host === new URL(origin()).hostname`.
+- **Affected (files, functions, data, UI):** `electron/main.js`, `tools/*.js`, `.github/workflows/diagnose-db.yml`
+- **Verification evidence:** `npm run check` passes.
+- **Fix status:** Worked (2026-11-21)
+
 ## Impact Register (ranked, most depended-on first)
 | Rank | Change ID | What depends on it | What breaks if altered, and why |
 |------|-----------|--------------------|---------------------------------|

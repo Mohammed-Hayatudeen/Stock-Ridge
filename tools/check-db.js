@@ -7,7 +7,7 @@ async function run() {
   const authToken = process.env.TURSO_AUTH_TOKEN;
   if (!url || !authToken) throw new Error('Creds missing');
   
-  const db = createTursoDatabase({ url, authToken, name: 'stock2' });
+  const db = createTursoDatabase({ url, authToken, name: process.env.DB_NAME || 'stockridge' });
 
   const u = await db.scalar('SELECT COUNT(*) FROM users');
   const ub = await db.scalar('SELECT COUNT(*) FROM businesses');

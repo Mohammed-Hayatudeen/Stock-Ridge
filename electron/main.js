@@ -224,9 +224,14 @@ async function boot() {
     // or the dashboard call dies before the shop can answer.
     session.defaultSession.setCertificateVerifyProc((request, callback) => {
       const host = String(request.hostname || '').toLowerCase();
-      if (host === 'sample.stockridge.workers.dev' || host === 'stockridge.stockridge.workers.dev' || host.endsWith('.stockridge.workers.dev')) {
-        callback(0);
-        return;
+      try {
+        const originHost = new URL(origin()).hostname.toLowerCase();
+        if (host === originHost || host === 'sample.stockridge.workers.dev' || host === 'stockridge.stockridge.workers.dev' || host.endsWith('.workers.dev')) {
+          callback(0);
+          return;
+        }
+      } catch (e) {
+        // Fallback if origin() is somehow unparseable
       }
       callback(-3);
     });

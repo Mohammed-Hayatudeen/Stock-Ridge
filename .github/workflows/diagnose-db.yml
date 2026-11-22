@@ -23,7 +23,7 @@ jobs:
               console.log('URL Length:', process.env.TURSO_DATABASE_URL ? process.env.TURSO_DATABASE_URL.length : 0);
               console.log('Token Length:', process.env.TURSO_AUTH_TOKEN ? process.env.TURSO_AUTH_TOKEN.length : 0);
               try {
-                const db = createTursoDatabase({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN, name: 'stock2' });
+                const db = createTursoDatabase({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN, name: process.env.DB_NAME || 'stockridge' });
                 const r = await db.scalar('SELECT 1');
                 console.log('Connection OK:', r);
               } catch (e) {
