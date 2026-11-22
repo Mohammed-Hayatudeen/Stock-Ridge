@@ -7,23 +7,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          node -e "
-            const { createTursoDatabase } = require('./worker/src/turso');
-            async function test() {
-              const db = createTursoDatabase({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN, name: process.env.DB_NAME || 'stockridge' });
-              const rows = await db.all('SELECT id, username, role, is_active FROM users');
-              const fs = require('fs');
-              fs.writeFileSync('diagnose.json', JSON.stringify(rows, null, 2));
-            }
-            test();
-          "
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add diagnose.json
-          git commit -m "Update diagnose.json"
-          git push
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node tools/reset-db.js > reset.log 2>&1
         env:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reset.log
+          git commit -m "Update reset.log"
+          git push
