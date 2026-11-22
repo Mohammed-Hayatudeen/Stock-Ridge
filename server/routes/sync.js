@@ -392,11 +392,23 @@ function mount(app, base = '/api') {
         if (col !== spec.scopeColumn && col !== 'business_id') continue;
         rejectedCols.push(col);
       }
+      
+      let hasChanges = !existing; // If no existing row, it has changes (insert).
       for (const col of spec.columns) {
         if (data[col] === undefined) continue;
         if (rejectedCols.includes(col)) continue;
+        
+        const newVal = normaliseValue(data[col]);
         sets.push(`${col} = ?`);
-        params.push(normaliseValue(data[col]));
+        params.push(newVal);
+        
+        if (existing) {
+          // Compare stringified values to handle SQLite types safely.
+          const oldVal = existing[col];
+          if (String(oldVal ?? '') !== String(newVal ?? '')) {
+            hasChanges = true;
+          }
+        }
       }
       if (rejectedCols.length) {
         results.mutations.push({ table, id: rowId, status: 'REJECTED', code: 'SCOPE_COLUMN_FORBIDDEN', message: `${table}.${rejectedCols.join(', ')} cannot be set from a device — it decides who can see the row.` });
@@ -442,6 +454,10 @@ function mount(app, base = '/api') {
             message: `That row was changed on the server after this device last saw it, so the server's version was kept. The device's version is stored under Sync → Conflicts. Refetch the row.`,
             serverVersion: existing,
           });
+          continue;
+        }
+        if (!hasChanges) {
+          results.mutations.push({ table, id: rowId, status: 'SKIPPED', code: 'IDENTICAL_DATA', message: 'Row already matches these values. Ignored to save writes.' });
           continue;
         }
         sets.push("updated_at = datetime('now')");
