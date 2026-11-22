@@ -37,7 +37,7 @@ async function run() {
   const url = process.env.TURSO_DATABASE_URL;
   const authToken = process.env.TURSO_AUTH_TOKEN;
   if (!url || !authToken) throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN required');
-  const db = createTursoDatabase({ url, authToken, name: 'stock2' });
+  const db = createTursoDatabase({ url, authToken, name: process.env.DB_NAME || 'stockridge' });
 
   const biz = [
     { id: idGen(), name: 'AquaRidge', profile: 'WATER', branches: ['AquaRidge', 'Aquakaru'] },
