@@ -29,6 +29,12 @@
 - **Verification evidence:** Code compiles successfully, passes `npm run check`, and variables are logically instantiated before being referenced.
 - **Fix status:** Worked (2026-11-22)
 
+### M6-20261122-02 — Boot Syncing Lag Fix (2026-11-22)
+- **What / how / why:** Both Android and Electron clients were hanging on the `Syncing...` splash screen for up to 3 minutes before showing the login screen. This was caused by two issues: 1) `await SR.sync.runOnce()` was being executed synchronously during boot, blocking UI rendering until the entire sync finished. 2) The offline probe fallback timeout (`SR.api.probe`) was accidentally increased from 8s to 180s globally, causing offline devices to hang. Fixed by removing the `await` on the boot sync so it processes asynchronously, and restoring the probe timeout to 8000ms.
+- **Affected (files, functions, data, UI):** `public/js/app.js` (`boot`), `public/js/api.js` (`probe`).
+- **Verification evidence:** UI now boots instantly and parses the `runOnce` queue seamlessly in the background without UI blocking.
+- **Fix status:** Worked (2026-11-22)
+
 ## Impact Register (ranked, most depended-on first)
 | Rank | Change ID | What depends on it | What breaks if altered, and why |
 |------|-----------|--------------------|---------------------------------|
