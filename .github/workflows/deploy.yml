@@ -108,7 +108,7 @@ jobs:
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           const doc = fs.readFileSync('docs/DEMO_SIGNINS.md', 'utf8');
-          const row = doc.split('\n').find((line) => line.includes('`bmstaff1abuja`'));
+          const row = doc.split('\n').find((line) => line.includes('bmstaff1abuja'));
           const cells = row.split('|').map((cell) => cell.trim());
           const username = cells[1].replaceAll('`', '');
           const pin = cells[4].replaceAll('`', '');
