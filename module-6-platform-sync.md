@@ -23,6 +23,12 @@
 - **Verification evidence:** `npm run check` passes.
 - **Fix status:** Worked (2026-11-21)
 
+### M6-20261122-01 — Temporal Dead Zone (TDZ) Fix (2026-11-22)
+- **What / how / why:** Discovered `Cannot access 'wantWatermark' before initialization` runtime crash on Android and Electron syncs. The `wantWatermark` and `revisionMap` variables were used inside a global revision optimization block in `server/routes/sync.js` *before* they were defined further down the script. Fixed by moving their declarations upwards above the conditional block.
+- **Affected (files, functions, data, UI):** `server/routes/sync.js`.
+- **Verification evidence:** Code compiles successfully, passes `npm run check`, and variables are logically instantiated before being referenced.
+- **Fix status:** Worked (2026-11-22)
+
 ## Impact Register (ranked, most depended-on first)
 | Rank | Change ID | What depends on it | What breaks if altered, and why |
 |------|-----------|--------------------|---------------------------------|
