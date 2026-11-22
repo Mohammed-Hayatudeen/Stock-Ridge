@@ -1,0 +1,8 @@
+name: Fetch Diagnose
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -s https://beta.stockridge0.workers.dev/api/diagnose > out.json
+      - run: cat out.json
