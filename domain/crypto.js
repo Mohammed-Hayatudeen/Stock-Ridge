@@ -130,7 +130,7 @@ async function hashPin(pin, saltHex) {
   const salt = saltHex ? base64urlToBytes(saltHex) : globalThis.crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   let hashHex;
   // Use node:crypto for massive local performance boost during PBKDF2 if available
-  if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+  if (typeof process !== 'undefined' && process.versions && process.versions.node && typeof require !== 'undefined') {
     const { pbkdf2Sync } = require('node:crypto');
     hashHex = bytesToHex(pbkdf2Sync(String(pin), salt, PBKDF2_ITERATIONS, PBKDF2_KEY_LENGTH_BITS / 8, 'sha256'));
   } else {
@@ -184,7 +184,7 @@ async function verifyPin(pin, stored) {
   try {
     const salt = base64urlToBytes(parts[3]);
     let candidate;
-    if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+    if (typeof process !== 'undefined' && process.versions && process.versions.node && typeof require !== 'undefined') {
       const { pbkdf2Sync } = require('node:crypto');
       candidate = bytesToHex(pbkdf2Sync(String(pin), salt, iterations, PBKDF2_KEY_LENGTH_BITS / 8, 'sha256'));
     } else {
