@@ -1,23 +1,44 @@
-[
-  {
-    "id": "9be848b3b5096a74",
-    "username": "admin",
-    "role": "ADMIN",
-    "is_active": 1,
-    "is_deleted": 0
+[ '', 'bmstaff1abuja', 'STAFF', 'BuildRidge HQ', '1118', '' ]
+bmstaff1abuja 1118
+Auth: {
+  ok: true,
+  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2MTYwZmY2NzVjZTk1ZjJhIiwicm9sZSI6IlNUQUZGIiwic2lkIjoiZGU1YzllMjMzNTgyNDFhMDIwNWNkMWI5ZjFjMjIxYTUiLCJpYXQiOjE3OTUzMzUzNTYsImV4cCI6MTc5NTM3ODU1NiwianRpIjoiZmIwNWIzZGJiMDhhYzc1ZTc4NjIzMzg1MTFmNWNmZWQifQ.GFo_sZsYu57U-nqDHEULD0mDBGLD9LcPqzh0aGs1oYc',
+  sessionId: 'de5c9e23358241a0205cd1b9f1c221a5',
+  profile: {
+    id: '6160ff675ce95f2a',
+    username: 'bmstaff1abuja',
+    fullName: 'bmstaff1abuja',
+    role: 'STAFF',
+    roleLabel: 'Staff',
+    jobTitle: null,
+    branchId: '97764f7458697266',
+    branchName: 'BuildRidge HQ',
+    businessId: 'ab170e66bcd37005',
+    businessName: 'BuildRidge',
+    profileCode: 'BUILDING_MATERIALS',
+    proprietor: false,
+    coOwner: false,
+    navigation: [
+      'dashboard',   'pos',
+      'sales',       'stock',
+      'customers',   'stocktake',
+      'till',        'deliveries',
+      'layaway',     'warranty',
+      'change-owed', 'attendance',
+      'sync',        'hire-book',
+      'fleet'
+    ]
   },
-  {
-    "id": "cfc9ff78c4047220",
-    "username": "cceo",
-    "role": "OWNER",
-    "is_active": 1,
-    "is_deleted": 0
+  scope: {
+    role: 'STAFF',
+    allBusinesses: false,
+    allBranches: false,
+    businessIds: [ 'ab170e66bcd37005' ],
+    branchIds: [ '97764f7458697266' ],
+    pinnedBranchId: '97764f7458697266',
+    pinnedBusinessId: null
   },
-  {
-    "id": "b9a3885b12bb8854",
-    "username": "ceo",
-    "role": "OWNER",
-    "is_active": 1,
-    "is_deleted": 0
-  }
-]
+  otherDevice: false,
+  dataResetAt: null
+}
+Dashboard status: 200
