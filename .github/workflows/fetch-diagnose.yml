@@ -1,16 +1,16 @@
 name: Fetch Diagnose
 on: workflow_dispatch
 permissions:
-  pull-requests: write
-  issues: write
+  contents: write
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - run: |
-          OUT=$(curl -s https://beta.stockridge0.workers.dev/api/diagnose)
-          gh issue comment 52 --body "\`\`\`json
-          $OUT
-          \`\`\`"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          curl -s https://beta.stockridge0.workers.dev/api/diagnose > diagnose.json || echo "{}" > diagnose.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add diagnose.json
+          git commit -m "Add diagnose.json"
+          git push
