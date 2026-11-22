@@ -13,13 +13,9 @@ jobs:
             const { createTursoDatabase } = require('./worker/src/turso');
             async function test() {
               const db = createTursoDatabase({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN, name: process.env.DB_NAME || 'stockridge' });
-              const tables = ['businesses', 'branches', 'users'];
-              const res = {};
-              for (const t of tables) {
-                res[t] = await db.scalar('SELECT COUNT(*) FROM ' + t);
-              }
+              const row = await db.all(\"SELECT id, username, role, is_active, is_deleted FROM users WHERE username IN ('admin', 'ceo', 'cceo')\");
               const fs = require('fs');
-              fs.writeFileSync('diagnose.json', JSON.stringify(res, null, 2));
+              fs.writeFileSync('diagnose.json', JSON.stringify(row, null, 2));
             }
             test();
           "
