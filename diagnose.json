@@ -1,0 +1,45 @@
+{
+  "runtime": "cloudflare-workers",
+  "ok": false,
+  "checks": [
+    {
+      "name": "database reachable",
+      "ok": true
+    },
+    {
+      "name": "schema applied",
+      "ok": true,
+      "tables": 88
+    },
+    {
+      "name": "migrations recorded",
+      "ok": true,
+      "count": 5,
+      "table": "_migrations"
+    },
+    {
+      "name": "an administrator exists",
+      "ok": false,
+      "count": 0
+    },
+    {
+      "name": "PIN hashing round-trip",
+      "ok": true,
+      "verifyCorrect": true,
+      "rejectWrong": true
+    },
+    {
+      "name": "administrator sign-in lookup",
+      "ok": false,
+      "username": null,
+      "hashFormat": "missing"
+    }
+  ],
+  "database": "turso",
+  "database_name": "stockridge",
+  "schema": {
+    "tables": 88,
+    "views": 22
+  },
+  "businesses": 14
+}
