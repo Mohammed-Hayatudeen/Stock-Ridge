@@ -15,7 +15,7 @@ run_worker_first = ["/api/*", "/diagnose"]
 ENVIRONMENT = "production"
 DB_NAME = "stockridge"
 # Public database location only. TURSO_AUTH_TOKEN and JWT_SECRET are Worker secrets.
-TURSO_DATABASE_URL = "https://stock2-mohammed-hayatudeen.aws-eu-central-1.turso.io"
+TURSO_DATABASE_URL = "https://stockridge-pharmaridge.aws-eu-north-1.turso.io"
 
 [observability]
 enabled = true
@@ -37,4 +37,4 @@ name = "sample"
 [env.sample.vars]
 ENVIRONMENT = "sample"
 DB_NAME = "stockridge-sample"
-TURSO_DATABASE_URL = "https://stock2-mohammed-hayatudeen.aws-eu-central-1.turso.io"
+TURSO_DATABASE_URL = "https://stockridge-pharmaridge.aws-eu-north-1.turso.io"
