@@ -232,8 +232,8 @@ async function run() {
     }
 
     await db.batch([{
-      sql: 'INSERT INTO users (id, username, pin_hash, role, business_id, branch_id, is_active, is_deleted) VALUES (?, ?, ?, ?, ?, ?, 1, 0)',
-      params: [uid, u.u, hp, u.r, bId, brId]
+      sql: 'INSERT INTO users (id, full_name, username, pin_hash, role, business_id, branch_id, is_active, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0)',
+      params: [uid, u.u, u.u, hp, u.r, bId, brId]
     }], { foreignKeys: false });
 
     if (u.bizAccess) {
