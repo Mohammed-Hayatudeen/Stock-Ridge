@@ -309,6 +309,13 @@
   }
 
   async function countCatalogueProducts() {
+    if (SR.store && typeof SR.store.tableStats === 'function') {
+      const ts = await SR.store.tableStats().catch(() => null);
+      if (ts && ts.tables) {
+         const p = ts.tables.find(t => t.table === 'products');
+         if (p) return p.count;
+      }
+    }
     const rows = await SR.store.all('products').catch(() => []);
     return (rows || []).filter(catalogueVisible).length;
   }
@@ -377,12 +384,23 @@
 
   async function pull({ full = false, tables = null } = {}) {
     if (!SR.api.isOnline()) {
-      const products = await SR.store.all('products').catch(() => []);
-      const stock = await SR.store.all('stock_batches').catch(() => []);
+      let hasCatalogue = true;
+      if (SR.store && typeof SR.store.tableStats === 'function') {
+        const ts = await SR.store.tableStats().catch(() => null);
+        if (ts && ts.tables) {
+          const pc = ts.tables.find(t => t.table === 'products');
+          const sc = ts.tables.find(t => t.table === 'stock_batches');
+          hasCatalogue = (pc && pc.count > 0) || (sc && sc.count > 0);
+        }
+      } else {
+        const products = await SR.store.all('products').catch(() => []);
+        const stock = await SR.store.all('stock_batches').catch(() => []);
+        hasCatalogue = products.length > 0 || stock.length > 0;
+      }
       const already = await SR.store.metaGet('last_pull_at').catch(() => null);
       // A later probe miss must not wipe a catalogue this till already saved.
       // That is what left Saving on Not saved after the copy had finished.
-      if (!products.length && !stock.length && !already) {
+      if (!hasCatalogue && !already) {
         await rememberPullError('The shop did not answer, so the catalogue was not copied onto this till.');
       }
       return { ok: false, offline: true, rows: 0 };
@@ -434,9 +452,20 @@
     await SR.store.metaSet('sync_pull_error', null);
     lastError = null;
     await SR.store.metaSet('sync_incomplete_since', softErrors.length ? (await SR.store.metaGet('sync_cursor', null)) : null);
-    const products = await SR.store.all('products').catch(() => []);
-    const stock = await SR.store.all('stock_batches').catch(() => []);
-    await SR.store.metaSet('catalogue_empty', products.length === 0 && stock.length === 0);
+    let hasCatalogue = true;
+    if (SR.store && typeof SR.store.tableStats === 'function') {
+      const ts = await SR.store.tableStats().catch(() => null);
+      if (ts && ts.tables) {
+        const pc = ts.tables.find(t => t.table === 'products');
+        const sc = ts.tables.find(t => t.table === 'stock_batches');
+        hasCatalogue = (pc && pc.count > 0) || (sc && sc.count > 0);
+      }
+    } else {
+      const products = await SR.store.all('products').catch(() => []);
+      const stock = await SR.store.all('stock_batches').catch(() => []);
+      hasCatalogue = products.length > 0 || stock.length > 0;
+    }
+    await SR.store.metaSet('catalogue_empty', !hasCatalogue);
     lastPullAt = savedAt;
     emit('change', status());
     return { ok: true, rows, cursor, truncated };
@@ -1502,9 +1531,20 @@
           try {
             if (await copyCounterBooks()) refresh = true;
           } catch (err) { /* a counter book is not the catalogue */ }
-          const storedProducts = await SR.store.all('products').catch(() => []);
-          const storedStock = await SR.store.all('stock_batches').catch(() => []);
-          if (!(storedProducts || []).length && !(storedStock || []).length) {
+          let hasCatalogue = true;
+          if (SR.store && typeof SR.store.tableStats === 'function') {
+            const ts = await SR.store.tableStats().catch(() => null);
+            if (ts && ts.tables) {
+              const pc = ts.tables.find(t => t.table === 'products');
+              const sc = ts.tables.find(t => t.table === 'stock_batches');
+              hasCatalogue = (pc && pc.count > 0) || (sc && sc.count > 0);
+            }
+          } else {
+            const storedProducts = await SR.store.all('products').catch(() => []);
+            const storedStock = await SR.store.all('stock_batches').catch(() => []);
+            hasCatalogue = (storedProducts || []).length > 0 || (storedStock || []).length > 0;
+          }
+          if (!hasCatalogue) {
             await SR.store.metaSet('catalogue_empty', true);
           }
           // The catalogue answer is in only when the pull itself finished.
@@ -1687,8 +1727,7 @@
       const shopCount = data && data.paging ? Number(data.paging.total) : null;
       if (!Number.isFinite(shopCount)) return;
       await SR.store.metaSet('shop_product_count', shopCount);
-      const localRows = await SR.store.all('products').catch(() => []);
-      const localCount = (localRows || []).filter((row) => catalogueVisible(row) && row.business_id).length;
+      const localCount = await countCatalogueProducts();
       // A chip refresh must not write Not saved, and must not start another
       // full copy just to clear it. The scheduled cycle already does that.
       // A matching owned count may clear a stale short-copy sentence.
@@ -1707,9 +1746,25 @@
     refreshShopCount();
     const syncStatus = status();
     const stats = await queueStats().catch(() => ({ pending: 0, failed: 0 }));
-    const products = await SR.store.all('products').catch(() => []);
-    const stock = await SR.store.all('stock_batches').catch(() => []);
-    const visibleProducts = (products || []).filter(catalogueVisible).length;
+    let stockRows = 0;
+    let productRows = 0;
+    let visibleProducts = 0;
+    if (SR.store && typeof SR.store.tableStats === 'function') {
+      const ts = await SR.store.tableStats().catch(() => null);
+      if (ts && ts.tables) {
+         const sb = ts.tables.find(t => t.table === 'stock_batches');
+         if (sb) stockRows = sb.count;
+         const p = ts.tables.find(t => t.table === 'products');
+         if (p) productRows = p.count;
+         visibleProducts = productRows;
+      }
+    } else {
+      const products = await SR.store.all('products').catch(() => []);
+      const stock = await SR.store.all('stock_batches').catch(() => []);
+      stockRows = (stock || []).length;
+      productRows = (products || []).length;
+      visibleProducts = (products || []).filter(catalogueVisible).length;
+    }
     const shopProductCount = Number(await SR.store.metaGet('shop_product_count').catch(() => 0)) || 0;
     const storedError = await SR.store.metaGet('sync_pull_error').catch(() => null);
     const memoryError = syncStatus.lastError ? String(syncStatus.lastError.message || syncStatus.lastError) : '';
@@ -1725,8 +1780,8 @@
       pullError,
       catalogueEmpty: await SR.store.metaGet('catalogue_empty').catch(() => null),
       salesCopied: Boolean(await SR.store.metaGet('sales_copy_at').catch(() => null)),
-      stockRows: (stock || []).length,
-      productRows: (products || []).length,
+      stockRows,
+      productRows,
       visibleProducts,
       shopProductCount,
     };

@@ -40,11 +40,14 @@
   function init() {
     apply(current());
     // Follow the operating system only while the user has never chosen.
-    matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', (e) => {
+    const mq = matchMedia('(prefers-color-scheme: dark)');
+    const handler = (e) => {
       let chosen = null;
       try { chosen = localStorage.getItem(KEY); } catch (err) { /* fine */ }
       if (!chosen) apply(e.matches ? 'dark' : 'light');
-    });
+    };
+    if (mq.addEventListener) mq.addEventListener('change', handler);
+    else if (mq.addListener) mq.addListener(handler);
   }
 
   SR.theme = { init, current, set, toggle, apply, onChange };
