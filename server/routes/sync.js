@@ -625,6 +625,25 @@ function mount(app, base = '/api') {
     // The Nigerian-market migration plants 4,828 shared goods. A cap of 5,000
     // would cut the tail of that list once a shop also has its own catalogue.
     const fullSync = !since;
+    // A till that already holds a cursor asks for a watermark. The id walk
+    // stays for a first copy and for a till that has not asked, so a shop
+    // deploy does not skip rows on an older screen.
+    const wantWatermark = body.watermark === true || body.watermark === 1 || body.watermark === '1';
+
+    // One row per mirrored table. A write bumps it. An idle till that already
+    // holds these numbers does not open the catalogue. A till that omits them
+    // keeps the watermark page, so an older screen is not skipped.
+    const askedRevisions = body.revisions && typeof body.revisions === 'object' && !Array.isArray(body.revisions)
+      ? body.revisions
+      : null;
+    let revisionMap = null;
+    try {
+      const revRows = await db.all('SELECT table_name, revision FROM sync_revisions');
+      revisionMap = new Map((revRows || []).map((row) => [String(row.table_name), Number(row.revision) || 0]));
+    } catch (e) {
+      revisionMap = null;
+    }
+
     // If the device only wants a watermark check and has not requested any full
     // tables, we can check a single global MAX timestamp across the entire schema 
     // by reading the trigger-maintained sync_revisions table. If no table has an
@@ -668,23 +687,6 @@ function mount(app, base = '/api') {
     const pageSize = paging ? Math.min(400, Math.max(1, Math.floor(pageSizeRaw))) : 0;
     const afterMap = body.after && typeof body.after === 'object' && !Array.isArray(body.after) ? body.after : {};
     const afterAtMap = body.after_at && typeof body.after_at === 'object' && !Array.isArray(body.after_at) ? body.after_at : {};
-    // A till that already holds a cursor asks for a watermark. The id walk
-    // stays for a first copy and for a till that has not asked, so a shop
-    // deploy does not skip rows on an older screen.
-    const wantWatermark = body.watermark === true || body.watermark === 1 || body.watermark === '1';
-    // One row per mirrored table. A write bumps it. An idle till that already
-    // holds these numbers does not open the catalogue. A till that omits them
-    // keeps the watermark page, so an older screen is not skipped.
-    const askedRevisions = body.revisions && typeof body.revisions === 'object' && !Array.isArray(body.revisions)
-      ? body.revisions
-      : null;
-    let revisionMap = null;
-    try {
-      const revRows = await db.all('SELECT table_name, revision FROM sync_revisions');
-      revisionMap = new Map((revRows || []).map((row) => [String(row.table_name), Number(row.revision) || 0]));
-    } catch (e) {
-      revisionMap = null;
-    }
 
     const requested = Array.isArray(body.tables) && body.tables.length
       ? body.tables.map((t) => String(t).toLowerCase())
