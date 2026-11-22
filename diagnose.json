@@ -1,5 +1,23 @@
-{
-  "businesses": 14,
-  "branches": 28,
-  "users": 101
-}
+[
+  {
+    "id": "9be848b3b5096a74",
+    "username": "admin",
+    "role": "ADMIN",
+    "is_active": 1,
+    "is_deleted": 0
+  },
+  {
+    "id": "cfc9ff78c4047220",
+    "username": "cceo",
+    "role": "OWNER",
+    "is_active": 1,
+    "is_deleted": 0
+  },
+  {
+    "id": "b9a3885b12bb8854",
+    "username": "ceo",
+    "role": "OWNER",
+    "is_active": 1,
+    "is_deleted": 0
+  }
+]
