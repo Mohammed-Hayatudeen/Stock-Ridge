@@ -8,9 +8,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          curl -s https://beta.stockridge0.workers.dev/api/diagnose > diagnose.json || echo "{}" > diagnose.json
+          npm ci --ignore-scripts --no-audit --no-fund
+          node -e "
+            const { createTursoDatabase } = require('./worker/src/turso');
+            async function test() {
+              const db = createTursoDatabase({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN, name: process.env.DB_NAME || 'stockridge' });
+              const rows = await db.all('SELECT id, username, role, is_active FROM users');
+              const fs = require('fs');
+              fs.writeFileSync('diagnose.json', JSON.stringify(rows, null, 2));
+            }
+            test();
+          "
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add diagnose.json
-          git commit -m "Add diagnose.json"
+          git commit -m "Update diagnose.json"
           git push
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
