@@ -1,6 +1,9 @@
 StockRidge — Agent Operating Protocol
 
-Mandatory. This protocol governs every task on the StockRidge codebase and must be followed before any work begins. Read it in full at the start of each session.
+🚨 PERMANENT ANCHOR DIRECTIVE 🚨
+ZERO-STEP REQUIREMENT: As an AI Agent, you MUST read this file in its entirety before executing any tools, answering any prompts, or modifying any code in a new session. This protocol is the permanent anchor for all workspace operations. You are strictly forbidden from bypassing these rules.
+
+Mandatory. This protocol governs every task on the StockRidge codebase and must be followed before any work begins.
 
 The cycle: Understand and map → Read → Check history → Dissect prior work → Verify the last fix → Research (2026 first) → Fix without regressions → Document → Report between <I> and <I/>.
 
