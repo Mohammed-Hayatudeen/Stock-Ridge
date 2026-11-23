@@ -5,6 +5,12 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M4-20261123-01 — Agent Protocol Permanent Anchor (2026-11-23)
+- **What / how / why:** Modified `agent.md` to include a "PERMANENT ANCHOR DIRECTIVE" at the very top. This acts as a strict psychological trigger for LLM agents, mandating that reading the protocol is the absolute "Zero-Step" in any new session before taking any action. 
+- **Affected (files, functions, data, UI):** `agent.md`.
+- **Verification evidence:** `agent.md` intro successfully patched.
+- **Fix status:** Worked (2026-11-23)
+
 ### M4-20261107-03 — Complete Erasure of Initial Float Capital Injections (2026-11-07)
 - **What / how / why:** Finalized the removal of manual initial floats during branch/business orchestration. Ran the local `simulate-year` audit tool to confirm books and data management flows remain totally clear and mathematically balanced (0 unbalanced journals) across a multi-business 365-day fiscal year run. Stripped `OPENING` from the `branch_safe_ledger.entry_type` table constraint and `OPENING_BALANCE` from `source_type` across the whole platform schema. Modified `tools/seed-pin-production.js` and `tools/simulate-year.js` payload generators to eliminate `opening_cash` declarations. This guarantees that initial "ghost/float money" never taints the books, establishing `TILLS` and `SAFES` as the exclusive gatekeepers of all localized capital logic within the application.
 - **Affected (files, functions, data, UI):** `schema/migrations/0001_schema.sql`, `server/services/glService.js`, `tools/simulate-year.js`, `tools/seed-pin-production.js`.
