@@ -246,9 +246,28 @@
       try {
         res = await SR.api.get(`/api/stocktakes/${encodeURIComponent(id)}`);
       } catch (err) {
-        host.replaceChildren();
-        host.appendChild(ui.errorBlock(err, { retry: { label: 'Try again', run: load } }));
-        return;
+        if (err && (err.isOffline || (err.isAuth && SR.state.user))) {
+          const session = await SR.store.get('stocktake_sessions', id).catch(() => null);
+          if (session) {
+            const lines = await SR.store.all('stocktake_lines').catch(() => []);
+            const sessionLines = lines.filter((l) => l && l.stocktake_id === id && !Number(l.is_deleted));
+            // Provide synthetic product names if offline, using products store
+            const prods = await SR.store.all('products').catch(() => []);
+            const pMap = new Map(prods.map(p => [String(p.id), p]));
+            sessionLines.forEach(l => {
+              if (pMap.has(String(l.product_id))) l.product_name = pMap.get(String(l.product_id)).name;
+            });
+            res = { session, lines: sessionLines, summary: {} };
+          } else {
+            host.replaceChildren();
+            host.appendChild(ui.errorBlock(err, { retry: { label: 'Try again', run: load } }));
+            return;
+          }
+        } else {
+          host.replaceChildren();
+          host.appendChild(ui.errorBlock(err, { retry: { label: 'Try again', run: load } }));
+          return;
+        }
       }
       const session = res.session || {};
       const lines = res.lines || [];

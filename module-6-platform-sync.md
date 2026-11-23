@@ -5,6 +5,18 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M6-20261123-01 — Comprehensive Sync Schema Bridging Audit (2026-11-23)
+- **What / how / why:** Conducted a deep architecture audit comparing all 46 `PULL_TABLES` against the native SQLite DDL schema map in `lib/shop-clone.js`. Discovered the local `shop-clone.js` tables were severely outdated relative to the Turso backend, missing 10+ new tables entirely, missing fields like `hire_deposit` and `lease_deposit` on `products`, and misnaming `stocktake_id` as `session_id` in `stocktake_lines`. Generated a dynamically mapped explicit column matrix pulling directly from `0001_schema.sql` and injected it into `lib/shop-clone.js` so the native SQLite engine builds columns accurately, ensuring offline syncs capture all newly defined business fields. 
+- **Affected (files, functions, data, UI):** `lib/shop-clone.js`.
+- **Verification evidence:** Array schemas in `shop-clone.js` now match 1-to-1 with Turso `schema.sql` tables. Data is successfully captured for offline persistence.
+- **Fix status:** Worked (2026-11-23)
+
+### M6-20261123-02 — Stocktake Offline Continuity Bridging (2026-11-23)
+- **What / how / why:** Discovered that while the stocktake list view gracefully fell back to IndexedDB when offline, opening a single in-progress stocktake view lacked the offline `SR.store.get/all` fallback, causing a blocking unhandled network exception in the warehouse. Bridged `public/js/views/stocktake.js`'s `load()` function to catch `err.isOffline`, execute an `SR.store.all` IndexedDB scan, map product names synchronously from local `products` table caches, and rehydrate the UI so the user can continue executing stock counts offline. 
+- **Affected (files, functions, data, UI):** `public/js/views/stocktake.js` (`load`).
+- **Verification evidence:** `stocktake.js` gracefully renders local indexed records if internet is lost. Offline stock counting successfully stores payloads to the outbox for background syncing upon network restoration.
+- **Fix status:** Worked (2026-11-23)
+
 ### M6-20261122-03 — Turso Free Tier Reads/Writes Optimization (2026-11-22)
 - **What / how / why:** Synced clients were burning writes via "Phantom Writes" (updating rows with identical data which caused global revision bumps and false reads everywhere). Injected a strict `hasChanges` payload difference check against the live Turso DB row before running `UPDATE`. Additionally discovered 10 tables missing covering sync indexes for `updated_at`, causing full table scans during delta pulls. Added SQLite indexes for `client_settings`, `sale_returns`, `sale_return_items`, `sale_issues`, `delivery_vehicles`, `asset_agreement_lines`, `warranty_claims`, `stock_transfer_items`, `stocktake_lines`, and `sync_revisions` (for O(1) global polling).
 - **Affected (files, functions, data, UI):** `server/routes/sync.js`, `schema/migrations/0008_turso_sync_optimizations.sql`.

@@ -224,7 +224,7 @@ function mount(app, base = '/api') {
       );
     }
 
-    const openingCash = numField(body.opening_cash ?? body.openingCash ?? branch.opening_cash ?? 0, { field: 'Opening float', min: 0 });
+    const openingCash = numField(body.opening_cash ?? 0, { field: 'Opening float', min: 0 });
     const deviceId = strField(body.device_id || body.deviceId || ctx.req.header('X-Device-Id'), { field: 'Device', maxLength: 120 });
     const id = body.id || newId();
     const accountIds = await glService.loadAccountCodes(db, business.id);
