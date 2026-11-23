@@ -5,6 +5,12 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M6-20261122-03 — Turso Free Tier Reads/Writes Optimization (2026-11-22)
+- **What / how / why:** Synced clients were burning writes via "Phantom Writes" (updating rows with identical data which caused global revision bumps and false reads everywhere). Injected a strict `hasChanges` payload difference check against the live Turso DB row before running `UPDATE`. Additionally discovered 10 tables missing covering sync indexes for `updated_at`, causing full table scans during delta pulls. Added SQLite indexes for `client_settings`, `sale_returns`, `sale_return_items`, `sale_issues`, `delivery_vehicles`, `asset_agreement_lines`, `warranty_claims`, `stock_transfer_items`, `stocktake_lines`, and `sync_revisions` (for O(1) global polling).
+- **Affected (files, functions, data, UI):** `server/routes/sync.js`, `schema/migrations/0008_turso_sync_optimizations.sql`.
+- **Verification evidence:** Validated DB query paths. Identical payload pushes now safely exit with `IDENTICAL_DATA` skipping the write and skipping the revision bump. The global revision check is now an indexed probe.
+- **Fix status:** Worked (2026-11-22)
+
 ### M6-20261111-01 — SQLite updated_at indexing (2026-11-11)
 - **What / how / why:** Discovered `changedOnly` sync scans parsed millions of rows locally without a timestamp index. Injected `idx_clone_table_updated_at` dynamically into native DDL logic (`lib/shop-clone.js`) to speed up sync processing.
 - **Affected (files, functions, data, UI):** `lib/shop-clone.js`.
@@ -38,8 +44,9 @@
 ## Impact Register (ranked, most depended-on first)
 | Rank | Change ID | What depends on it | What breaks if altered, and why |
 |------|-----------|--------------------|---------------------------------|
-| 1 | M6-20261111-02 | Polling loops across all active devices | Returning this to brute-force fetches exceeds Turso Free Tier logical read limits, causing database lockout for all clients. |
-| 2 | M6-20261111-01 | All offline delta-sync filtering (`changedOnly`) | Removing the index will drastically slow down background offline synchronization loops, crashing older Android phones via OOM. |
+| 1 | M6-20261122-03 | Sync write mutations and polling | Reverting this causes exponential write amplification and full table scans on delta pulls, exhausting Turso limits rapidly. |
+| 2 | M6-20261111-02 | Polling loops across all active devices | Returning this to brute-force fetches exceeds Turso Free Tier logical read limits, causing database lockout for all clients. |
+| 3 | M6-20261111-01 | All offline delta-sync filtering (`changedOnly`) | Removing the index will drastically slow down background offline synchronization loops, crashing older Android phones via OOM. |
 
 ## Research Log
 | Date | Topic / query | Source + URL | Source date · version | Takeaway | How applied |
