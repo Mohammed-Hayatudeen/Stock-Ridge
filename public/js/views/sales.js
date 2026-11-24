@@ -88,10 +88,10 @@
         rows = data.data || [];
       } catch (err) {
         rows = await SR.store.all('product_categories', {
-          where: (row) => !Number(row.is_deleted) && !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()),
+          where: (row) => !Number(row.is_deleted) && String(row.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS',
         }).catch(() => []);
       }
-      rows = (rows || []).filter((row) => !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()))
+      rows = (rows || []).filter((row) => String(row.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS')
         .slice()
         .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
       const current = select.value;

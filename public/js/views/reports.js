@@ -118,7 +118,7 @@
       } catch (err) {
         rows = [];
       }
-      rows = rows.filter((row) => !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()))
+      rows = rows.filter((row) => String(row.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS')
         .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
       const current = state.category;
       select.replaceChildren(ui.h('option', { value: '' }, 'All categories'));

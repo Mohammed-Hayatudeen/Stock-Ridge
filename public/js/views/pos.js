@@ -221,7 +221,7 @@
     const categoryField = ui.h('label', { class: 'field pos-category' },
       ui.h('span', { class: 'field-label' }, 'Selling category'),
       categorySelect,
-      ui.h('span', { class: 'hint' }, 'One list. Pick a category, or leave this on all categories. A NAFDAC catalogue drug stays pharmaceutical whichever category it is filed in.'));
+      ui.h('span', { class: 'hint' }, 'Pick a category to filter the shelf, or leave it on all categories.'));
     if (plant) categoryField.hidden = true;
     const scanCard = ui.h('div', { class: 'card' },
       ui.h('div', { class: 'card-body' },
@@ -466,10 +466,10 @@
       } catch (err) {
         rows = await SR.store.all('product_categories', {
           where: (row) => !Number(row.is_deleted) && Number(row.is_active) !== 0
-            && !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()),
+            && String(row.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS',
         }).catch(() => []);
       }
-      rows = (rows || []).filter((row) => !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()))
+      rows = (rows || []).filter((row) => String(row.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS')
         .slice()
         .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
       const current = categorySelect.value;

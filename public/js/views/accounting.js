@@ -119,7 +119,7 @@
       } catch (err) {
         rows = [];
       }
-      rows = rows.filter((row) => !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(row.code || '').toUpperCase()))
+      rows = rows.filter((row) => String(row.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS')
         .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
       const current = state.category;
       select.replaceChildren(ui.h('option', { value: '' }, 'All categories'));
@@ -239,7 +239,7 @@
         kind: U.sellingGroup({ code: row.category_code, parent_code: row.category_parent_code }).label,
       }));
       if (categoryRows.length || (data.bySellingGroup || []).length) {
-        stack.appendChild(ui.h('p', { class: 'sub' }, 'One list. Each category counts as pharmaceuticals or as others. A discount or a delivery fee stays in the profit and loss above, because it is not a category.'));
+        stack.appendChild(ui.h('p', { class: 'sub' }, 'Categories group your sales. A discount or a delivery fee stays in the profit and loss above, because it is not a category.'));
         stack.appendChild(ui.dataCard({
           title: 'Categories',
           table: ui.renderTable({

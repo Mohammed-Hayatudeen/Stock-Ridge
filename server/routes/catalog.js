@@ -399,14 +399,13 @@ async function listGreenbook(db, businessId, { limit, offset, search, categoryId
       ORDER BY id LIMIT 1`,
     [String(businessId)],
   );
-  if (categoryId) {
-    const chosen = await db.first(
-      'SELECT id, code, name FROM product_categories WHERE id = ? AND business_id = ? AND is_deleted = 0',
-      [String(categoryId), String(businessId)],
-    );
-    if (!chosen) return listResponse([], { limit, offset }, 0);
-    if (String(chosen.code) !== 'PHARMACEUTICALS') return null;
-  }
+  if (!categoryId) return null; // Must select Pharmaceuticals category to browse the Greenbook.
+  const chosen = await db.first(
+    'SELECT id, code, name FROM product_categories WHERE id = ? AND business_id = ? AND is_deleted = 0',
+    [String(categoryId), String(businessId)],
+  );
+  if (!chosen) return listResponse([], { limit, offset }, 0);
+  if (String(chosen.code) !== 'PHARMACEUTICALS') return null;
   const where = [];
   const params = [];
   if (search) {
