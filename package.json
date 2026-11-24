@@ -40,7 +40,7 @@
     "minimatch": "11.0.1"
   },
   "dependencies": {
-    "better-sqlite3-multiple-ciphers": "13.0.3"
+    "better-sqlite3-multiple-ciphers": "^13.0.3"
   },
   "devDependencies": {
     "electron": "44.10.0",
@@ -53,15 +53,47 @@
     "artifactName": "StockRidge-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "npmRebuild": false,
-    "asarUnpack": ["**/node_modules/better-sqlite3-multiple-ciphers/**"],
-    "files": ["electron/**/*", "lib/**/*", "public/**/*", "package.json"],
-    "extraResources": [
-      {"from": "build/stockridge", "to": "stockridge"},
-      {"from": "build/desktop-config.json", "to": "desktop-config.json"}
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3-multiple-ciphers/**"
     ],
-    "directories": {"output": "dist", "buildResources": "build"},
-    "linux": {"target": ["AppImage"], "category": "Office"},
-    "win": {"target": ["dir"], "signAndEditExecutable": false},
-    "mac": {"target": ["zip", "dmg"], "category": "public.app-category.business"}
+    "files": [
+      "electron/**/*",
+      "lib/**/*",
+      "public/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/stockridge",
+        "to": "stockridge"
+      },
+      {
+        "from": "build/desktop-config.json",
+        "to": "desktop-config.json"
+      }
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office"
+    },
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": [
+        "zip",
+        "dmg"
+      ],
+      "category": "public.app-category.business"
+    }
   }
 }

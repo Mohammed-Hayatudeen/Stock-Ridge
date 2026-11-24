@@ -103,6 +103,17 @@ function mountGuarded(app, base = '/api/branding') {
 
     updates.push("updated_at = datetime('now')");
     updates.push('updated_by = ?'); params.push(String(user.id));
+    
+    const existing = await db.first('SELECT id FROM client_settings WHERE id = 1');
+    if (!existing) {
+      const { DEFAULT_SETTINGS } = require('../../domain/planLimits');
+      const allCols = Object.keys(DEFAULT_SETTINGS);
+      const insertCols = allCols.join(', ') + ', updated_at';
+      const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
+      const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
+      await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+    }
+
     params.push(1);
     await db.run(`UPDATE client_settings SET ${updates.join(', ')} WHERE id = ?`, params);
 
@@ -130,6 +141,15 @@ function mountGuarded(app, base = '/api/branding') {
     const check = logoDataUrl(String(value));
     if (!check.ok) throw new HttpError(check.error, { status: 400, code: check.code, fields: { logoDataUrl: check.error } });
 
+    const existing = await db.first('SELECT id FROM client_settings WHERE id = 1');
+    if (!existing) {
+      const { DEFAULT_SETTINGS } = require('../../domain/planLimits');
+      const allCols = Object.keys(DEFAULT_SETTINGS);
+      const insertCols = allCols.join(', ') + ', updated_at';
+      const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
+      const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
+      await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+    }
     await db.run("UPDATE client_settings SET logo_data_url = ?, updated_at = datetime('now'), updated_by = ? WHERE id = 1", [check.value, String(user.id)]);
     await recordFromCtx(ctx, { action: 'BRANDING_UPDATED', entityType: 'CLIENT_SETTINGS', entityId: '1', after: { logoBytes: Math.round(String(check.value).length * 0.75) } });
 
@@ -145,6 +165,15 @@ function mountGuarded(app, base = '/api/branding') {
     const db = ctx.env.DB || ctx.env.db;
     const user = ctx.get('user');
     if (!canChangeDeployment(user)) throw new HttpError('Only the proprietor or an administrator can change the logo.', { status: 403, code: 'ROLE_REQUIRED' });
+    const existing = await db.first('SELECT id FROM client_settings WHERE id = 1');
+    if (!existing) {
+      const { DEFAULT_SETTINGS } = require('../../domain/planLimits');
+      const allCols = Object.keys(DEFAULT_SETTINGS);
+      const insertCols = allCols.join(', ') + ', updated_at';
+      const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
+      const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
+      await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+    }
     await db.run("UPDATE client_settings SET logo_data_url = NULL, updated_at = datetime('now'), updated_by = ? WHERE id = 1", [String(user.id)]);
     await recordFromCtx(ctx, { action: 'BRANDING_UPDATED', entityType: 'CLIENT_SETTINGS', entityId: '1', after: { logoDataUrl: null } });
     ctx.json({ ok: true, message: 'Logo removed. The StockRidge logo will be used instead.' });

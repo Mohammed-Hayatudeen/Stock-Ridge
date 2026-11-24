@@ -220,6 +220,15 @@ function mount(app, base = '/api', { modes = [], notice = '' } = {}) {
     // cleanup itself failed, and a dry run never reaches here.
     if (!(result.failed || []).length && result.total > 0) {
       try {
+        const existingSettings = await db.first('SELECT id FROM client_settings WHERE id = 1');
+        if (!existingSettings) {
+          const { DEFAULT_SETTINGS } = require('../../domain/planLimits');
+          const allCols = Object.keys(DEFAULT_SETTINGS);
+          const insertCols = allCols.join(', ') + ', updated_at';
+          const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
+          const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
+          await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+        }
         await db.run(`UPDATE client_settings SET data_reset_at = datetime('now'), updated_at = datetime('now') WHERE id = 1`);
       } catch (err) { /* an old file without the column must not fail a cleanup that already finished */ }
     }

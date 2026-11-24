@@ -1,7 +1,7 @@
 -- 0008_turso_sync_optimizations.sql
 -- Optimizing Turso Free Tier reads by adding covering indexes for sync delta polling
 
-CREATE INDEX IF NOT EXISTS idx_sync_client_settings_optim ON client_settings(business_id, updated_at, id);
+CREATE INDEX IF NOT EXISTS idx_sync_client_settings_optim ON client_settings(updated_at, id);
 CREATE INDEX IF NOT EXISTS idx_sync_sale_returns_optim ON sale_returns(branch_id, updated_at, id);
 CREATE INDEX IF NOT EXISTS idx_sync_sale_return_items_optim ON sale_return_items(updated_at, id);
 CREATE INDEX IF NOT EXISTS idx_sync_sale_issues_optim ON sale_issues(branch_id, updated_at, id);
