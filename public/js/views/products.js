@@ -126,7 +126,7 @@
         paintShelves(rows, data.unfiled || { product_count: 0, products: [] });
         return rows;
       } catch (err) {
-        const rows = byName(await SR.store.all('product_categories', { where: (c) => !Number(c.is_deleted) && !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(c.code || '').toUpperCase()) }));
+        const rows = byName(await SR.store.all('product_categories', { where: (c) => !Number(c.is_deleted) && String(c.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS' }));
         catSel.replaceChildren(ui.h('option', { value: '' }, 'All categories'));
         for (const c of rows) catSel.appendChild(ui.h('option', { value: String(c.id) }, c.name));
         paintShelves(rows, { product_count: 0, products: [] });
@@ -144,7 +144,7 @@
     }
     async function editCategory(category) {
       const wrapEl = ui.h('div', {});
-      wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'The name is what the catalogue shows. Pharmaceuticals and others are the same list. Products already in the category stay in it. A NAFDAC catalogue medicine stays pharmaceutical even if the category moves.'));
+      wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'Rename this category across the entire catalogue.'));
       wrapEl.appendChild(ui.h('div', { class: 'form-grid' },
         ui.field({ label: 'Category name', name: 'name', value: category.name, required: true })));
       const m = ui.openModal({
@@ -228,7 +228,7 @@
             ui.h('span', { class: 'badge' }, `${count} product${count === 1 ? '' : 's'}`),
             side === 'PHARMACEUTICALS' ? ui.badge('Pharmaceuticals', 'badge-info') : (side ? ui.badge('Others', 'badge-mute') : null)),
           Number(category.nafdac_count) > 0
-            ? ui.h('p', { class: 'hint' }, 'Products copied from the NAFDAC catalogue stay pharmaceutical, even if this shelf moves.')
+            ? ui.h('p', { class: 'hint' }, 'Products copied from the NAFDAC catalogue are permanently assigned to the Pharmaceuticals category.')
             : null,
           shown.length
             ? ui.h('div', { class: 'stack' }, ...shown.map(productLine))
@@ -249,8 +249,8 @@
           ui.h('div', { class: 'card-body' },
             ui.h('h2', {}, 'Categories'),
             ui.h('p', { class: 'hint' }, canOrganize()
-              ? 'One list. A category counts as pharmaceuticals or as others. Add a category, or edit one to rename it or change which it counts as. The products stay in it. A NAFDAC catalogue medicine stays pharmaceutical.'
-              : 'One list. A category counts as pharmaceuticals or as others.'),
+              ? 'Categories group your inventory. For Pharmacy branches, the system automatically provides a NAFDAC drugs category.'
+              : 'Categories group your inventory.'),
             ui.h('p', { class: 'hint' }, `${ordered.length} categor${ordered.length === 1 ? 'y' : 'ies'} · ${count} product${count === 1 ? '' : 's'}`))),
         cards.length
           ? ui.h('div', { class: 'stack' }, ...cards)
@@ -271,7 +271,7 @@
           verticals.push({ value: String(s.id), label: SR.util.humanise(p) });
         }
       }
-      wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'One list. A NAFDAC medicine stays pharmaceutical. The category is filed across all businesses in the vertical you choose.'));
+      wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'The category is filed across all businesses in the vertical you choose. NAFDAC drugs have a permanently assigned category.'));
       wrapEl.appendChild(ui.h('div', { class: 'form-grid' },
         ui.field({
           label: 'Business Vertical',
@@ -601,7 +601,7 @@
     }
     const fields = [
       ui.field({ label: 'Name', name: 'name', value: base.name || '', required: true, span: true, placeholder: 'e.g. Hisense 1.5HP Split Air Conditioner' }),
-      ui.field({ label: 'Category', name: 'category_id', value: base.category_id || '', hint: greenbook ? 'Optional. The NAFDAC catalogue link already makes this pharmaceutical, whichever category you file it in.' : 'One list. Pick the category. Pharmaceuticals and others are not a second tree. A NAFDAC catalogue medicine stays pharmaceutical.', options: [{ value: '', label: '— none —' }].concat(categories.filter((c) => !['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(String(c.code || '').toUpperCase())).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })).map((c) => ({ value: String(c.id), label: c.name }))) }),
+      ui.field({ label: 'Category', name: 'category_id', value: base.category_id || '', hint: greenbook ? 'Optional. NAFDAC medicines are automatically assigned to the Pharmaceuticals category.' : 'Pick a category to group this item.', options: [{ value: '', label: '— none —' }].concat(categories.filter((c) => String(c.code || '').toUpperCase() !== 'NON_PHARMACEUTICALS').slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })).map((c) => ({ value: String(c.id), label: c.name }))) }),
       ui.field({ label: 'Brand', name: 'brand', value: base.brand || '' }),
       ui.field({ label: 'Model number', name: 'model_no', value: base.model_no || '' }),
       ui.field({ label: 'SKU', name: 'sku', value: base.sku || '', hint: greenbook ? 'Left blank, one is taken from the NAFDAC number.' : 'Left blank, one is suggested from the name.' }),

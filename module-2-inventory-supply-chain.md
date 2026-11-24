@@ -5,6 +5,12 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M2-20261123-01 — Category UI Simplification & Pharmaceutical Pinning (2026-11-23)
+- **What / how / why:** Removed legacy explanatory text from the UI ("One list. A category counts as pharmaceuticals or as others...") because it was confusing and obsolete. Replaced it with cleaner phrasing explaining that NAFDAC drugs are automatically anchored to the Pharmaceutical category, which is automatically provided for the Pharmacy business vertical. Also removed the UI filter that hid the Pharmaceutical category from manual product edits and the offline index cache, ensuring that the pharmacy vertical consistently displays the category.
+- **Affected (files, functions, data, UI):** `public/js/views/products.js`.
+- **Verification evidence:** Code updated successfully. NAFDAC drugs and normal catalog definitions now share cleaner UI rules regarding category classifications.
+- **Fix status:** Worked (2026-11-23)
+
 ### M2-20261107-02 — Product Category Field Refactoring (2026-11-07)
 - **What / how / why:** The category creation and edit modals contained an extraneous "Counts as" (`selling_group`) field meant to separate "Pharmaceuticals" from "Others". Because NAFDAC adoptions inherently bypass this manual UI via the fixed `PHARMACEUTICALS` category creation (`ensurePharmaceuticalCategory`) and the `U.sellingGroup()` logic uses `nafdac_catalog_id` directly, the manual UI field was redundant and mathematically ignored on the backend. Removed `selling_group` entirely from the product view modals to satisfy the strict two-field constraint (Business Vertical + Category Name).
 - **Affected (files, functions, data, UI):** `public/js/views/products.js` (`createCategory`, `editCategory`).
