@@ -1766,6 +1766,15 @@ function mount(app, base = '/api') {
 
     sets.push('updated_at = datetime(\'now\')', 'updated_by = ?');
     params.push(String(user.id), id);
+    
+    const existing = await db.first('SELECT id FROM client_settings WHERE id = ?', [id]);
+    if (!existing) {
+      const allCols = Object.keys(DEFAULT_SETTINGS);
+      const insertCols = allCols.join(', ') + ', updated_at';
+      const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
+      const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
+      await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+    }
     await db.run(`UPDATE client_settings SET ${sets.join(', ')} WHERE id = ?`, params);
 
     // PLAN_LIMITS_CHANGED was an allowed audit action that nothing ever recorded —

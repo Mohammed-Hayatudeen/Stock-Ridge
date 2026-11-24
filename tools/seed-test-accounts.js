@@ -51,6 +51,16 @@ async function run() {
 
   const branchMap = {}; // name -> { id, bizId }
 
+  const existingSettings = await db.first('SELECT id FROM client_settings WHERE id = 1');
+  if (!existingSettings) {
+    const { DEFAULT_SETTINGS } = require('../domain/planLimits');
+    const allCols = Object.keys(DEFAULT_SETTINGS);
+    const insertCols = allCols.join(', ') + ', updated_at';
+    const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
+    const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
+    await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+  }
+
   console.log('Inserting Businesses and Branches...');
   for (let i = 0; i < biz.length; i++) {
     const b = biz[i];

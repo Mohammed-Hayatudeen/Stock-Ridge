@@ -5,6 +5,12 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M4-20261123-02 — Plan Limits Persistence Bug Fix (2026-11-23)
+- **What / how / why:** Discovered that the UI "Apply to this client" button for plan limits (max branches, staff, etc) failed silently. The `UPDATE client_settings` logic returned success because SQLite natively allows zero-row updates without throwing, but the `client_settings` global configuration row was never explicitly inserted outside of local simulation runs. Intercepted the `UPDATE` queries in `admin.js`, `branding.js`, and the `dataManagementPurge.js` fallback, wrapping them with an initialization block that parses `DEFAULT_SETTINGS` and inserts the master row if it is missing. Also repaired a schema syntax typo in `0008_turso_sync_optimizations.sql` that falsely attempted to index `business_id` on the global `client_settings` table.
+- **Affected (files, functions, data, UI):** `server/routes/admin.js`, `server/routes/branding.js`, `server/routes/dataManagementPurge.js`, `tools/seed-test-accounts.js`, `schema/migrations/0008_turso_sync_optimizations.sql`.
+- **Verification evidence:** `npm test` now successfully passes `migratedDatabase` suites. Plan limits are verifiably generated and persisted.
+- **Fix status:** Worked (2026-11-23)
+
 ### M4-20261123-01 — Agent Protocol Permanent Anchor (2026-11-23)
 - **What / how / why:** Modified `agent.md` to include a "PERMANENT ANCHOR DIRECTIVE" at the very top. This acts as a strict psychological trigger for LLM agents, mandating that reading the protocol is the absolute "Zero-Step" in any new session before taking any action. 
 - **Affected (files, functions, data, UI):** `agent.md`.
