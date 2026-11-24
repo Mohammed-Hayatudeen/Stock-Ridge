@@ -1222,6 +1222,11 @@ function mount(app, base = '/api') {
     }
     const marks = ids.map(() => '?').join(',');
     const businessesById = new Map(businesses.map((business) => [String(business.id), business]));
+    for (const business of businesses) {
+      if (String(business.profile_code).toUpperCase() === 'PHARMACEUTICAL') {
+        await ensurePharmaShelves(db, String(business.id));
+      }
+    }
     const rows = await db.all(
       `SELECT c.*,
               (SELECT COUNT(*) FROM products p
