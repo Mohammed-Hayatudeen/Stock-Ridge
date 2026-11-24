@@ -5,6 +5,12 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M2-20261123-02 — Complete Removal of UI Pharmaceutical Category Exclusions (2026-11-23)
+- **What / how / why:** Discovered that despite adding NAFDAC drugs to the Pharmaceutical category, they were forcibly hidden from the category dropdowns in POS, Reporting, Sales, and Accounting views because the UI actively filtered out `PHARMACEUTICALS` natively (e.g. `!['PHARMACEUTICALS', 'NON_PHARMACEUTICALS'].includes(...)`). Re-wrote the exclusions across `pos.js`, `accounting.js`, `reports.js`, and `stock.js` to only exclude `NON_PHARMACEUTICALS`, restoring NAFDAC product visibility across all inventory routing nodes. Also fixed a backend bug where selecting "All categories" hijacked the product payload and queried only the greenbook list.
+- **Affected (files, functions, data, UI):** `public/js/views/pos.js`, `public/js/views/accounting.js`, `public/js/views/reports.js`, `public/js/views/sales.js`, `public/js/views/stock.js`, `server/routes/catalog.js`.
+- **Verification evidence:** Validated search and fetch exclusions natively. `Pharmaceuticals` is now correctly parsed and selectable.
+- **Fix status:** Worked (2026-11-23)
+
 ### M2-20261123-01 — Category UI Simplification & Pharmaceutical Pinning (2026-11-23)
 - **What / how / why:** Removed legacy explanatory text from the UI ("One list. A category counts as pharmaceuticals or as others...") because it was confusing and obsolete. Replaced it with cleaner phrasing explaining that NAFDAC drugs are automatically anchored to the Pharmaceutical category, which is automatically provided for the Pharmacy business vertical. Also removed the UI filter that hid the Pharmaceutical category from manual product edits and the offline index cache, ensuring that the pharmacy vertical consistently displays the category.
 - **Affected (files, functions, data, UI):** `public/js/views/products.js`.

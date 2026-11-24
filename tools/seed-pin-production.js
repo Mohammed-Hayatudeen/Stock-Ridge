@@ -49,6 +49,17 @@ async function seedPinData(db) {
     usersCreated: 0, usersPreserved: 0,
   };
   const expectedUsernames = [];
+  
+  const existingSettings = await db.first('SELECT id FROM client_settings WHERE id = 1');
+  if (!existingSettings) {
+    const { DEFAULT_SETTINGS } = require('../domain/planLimits');
+    const allCols = Object.keys(DEFAULT_SETTINGS);
+    const insertCols = allCols.join(', ') + ', updated_at';
+    const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
+    const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
+    await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+  }
+
   for (const definition of DEFINITIONS) {
     let business = await db.first('SELECT * FROM businesses WHERE name=? AND is_deleted=0', [definition.name]);
     if (business) {
