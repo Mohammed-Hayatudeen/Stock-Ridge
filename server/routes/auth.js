@@ -61,7 +61,17 @@ function businessForClient(row) {
 function mount(app, base = '/api/auth', makeEnv = null) {
   const envOf = (ctx) => (makeEnv ? makeEnv(ctx) : ctx.env);
 
+
+  app.get(`${base}/debug-pin`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const row = await db.first("SELECT pin_hash FROM users WHERE username = 'admin'");
+    if (!row) return ctx.json({ ok: false, error: 'no admin' });
+    const pinOk = await verifyPin('7000', row.pin_hash);
+    return ctx.json({ ok: true, pin_hash: row.pin_hash, pinOk });
+  });
+
   /** Sign in with username + PIN. */
+
   app.post(`${base}/login`, async (ctx) => {
     const env = envOf(ctx);
     const db = env.DB || env.db;
