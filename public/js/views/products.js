@@ -95,16 +95,17 @@
       return row && row.selling_group ? row.selling_group : U.sellingGroup(row || {}).code;
     }
 
-    const toolbar = ui.h('div', { class: 'card' }, ui.h('div', { class: 'card-body row' }));
+    const toolbar = ui.h('div', { class: 'section-dock row', style: { margin: '0 0 16px 0', padding: '12px 0 8px 0', zIndex: '10' } });
     const qInput = ui.h('input', {
       type: 'search',
       placeholder: SR.state.moduleOn('nafdac') ? 'Start of a name, ingredient or NAFDAC number…' : 'Name, SKU, brand or model…',
       style: { minWidth: '210px' },
     });
     qInput.value = state.q;
-    toolbar.firstElementChild.appendChild(ui.h('div', { class: 'grow' }, qInput));
-    const catSel = ui.h('select', { onchange: (e) => { state.category = e.target.value; state.page = 0; state.highlightId = null; load(); } });
-    toolbar.firstElementChild.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Category'), catSel));
+    qInput.addEventListener('input', ui.debounceInput(qInput, (v) => { state.q = v; state.page = 0; state.highlightId = null; load(); }, 320));
+    toolbar.appendChild(ui.h('div', { class: 'grow' }, qInput));
+    const catSel = ui.h('select', { onchange: (e) => { state.category = e.target.value; state.page = 0; state.highlightId = null; fillCategories(); load(); } });
+    toolbar.appendChild(ui.h('div', {}, ui.h('label', { class: 'ctl' }, 'Category'), catSel));
     wrap.appendChild(toolbar);
     wrap.appendChild(shelvesHost);
 
@@ -239,23 +240,69 @@
     }
     function paintShelves(rows, unfiled) {
       const ordered = byName(rows);
-      const cards = ordered.map((row) => shelfCard(row, row.products || [], Number(row.product_count) || 0));
+      
+      const tabList = ui.h('div', { class: 'tabs', role: 'tablist', style: { marginBottom: '16px' } });
+      const tabContent = ui.h('div', { class: 'tab-content' });
+      const tabsMap = [];
+      
+      function addTab(category, products, count) {
+        const card = shelfCard(category, products, count);
+        const panel = ui.h('div', { role: 'tabpanel', hidden: true }, card);
+        const btn = ui.h('button', { class: 'tab', type: 'button', role: 'tab' }, category.name);
+        
+        btn.addEventListener('click', (ev) => {
+          for (const m of tabsMap) {
+            m.btn.classList.toggle('is-active', m.btn === btn);
+            m.btn.setAttribute('aria-selected', m.btn === btn);
+            m.panel.hidden = m.panel !== panel;
+          }
+          // Do not trigger load() if this click was programmatic from the initial render.
+          if (ev.isTrusted && String(state.category) !== String(category.id || '')) {
+            state.category = category.id || '';
+            state.page = 0;
+            state.highlightId = null;
+            if (catSel) catSel.value = state.category;
+            load();
+          }
+        });
+        tabList.appendChild(btn);
+        tabContent.appendChild(panel);
+        tabsMap.push({ btn, panel, categoryId: String(category.id || '') });
+      }
+
+      for (const row of ordered) {
+        addTab(row, row.products || [], Number(row.product_count) || 0);
+      }
+      if (unfiled && Number(unfiled.product_count)) {
+        addTab({ id: '', name: 'Not in a category' }, unfiled.products || [], Number(unfiled.product_count) || 0);
+      }
+
+      let activeTabBtn = null;
+      if (state.category) {
+        const found = tabsMap.find(m => m.categoryId === String(state.category));
+        if (found) activeTabBtn = found.btn;
+      }
+      if (!activeTabBtn && tabsMap.length > 0) {
+        activeTabBtn = tabsMap[0].btn;
+      }
+      if (activeTabBtn) activeTabBtn.click();
+
       const count = ordered.reduce((sum, row) => sum + (Number(row.product_count) || 0), 0);
-      const loose = unfiled && Number(unfiled.product_count)
-        ? shelfCard({ id: '', name: 'Not in a category' }, unfiled.products || [], Number(unfiled.product_count) || 0)
-        : null;
+      
+      const categoriesSummary = ui.h('div', { class: 'card' },
+        ui.h('div', { class: 'card-body' },
+          ui.h('h2', {}, 'Categories'),
+          ui.h('p', { class: 'hint' }, canOrganize()
+            ? 'Categories group your inventory. For Pharmacy branches, the system automatically provides a NAFDAC drugs category.'
+            : 'Categories group your inventory.'),
+          ui.h('p', { class: 'hint', style: { marginBottom: 0 } }, `${ordered.length} categor${ordered.length === 1 ? 'y' : 'ies'} · ${count} product${count === 1 ? '' : 's'}`)
+        )
+      );
+
       shelvesHost.replaceChildren(
-        ui.h('div', { class: 'card' },
-          ui.h('div', { class: 'card-body' },
-            ui.h('h2', {}, 'Categories'),
-            ui.h('p', { class: 'hint' }, canOrganize()
-              ? 'Categories group your inventory. For Pharmacy branches, the system automatically provides a NAFDAC drugs category.'
-              : 'Categories group your inventory.'),
-            ui.h('p', { class: 'hint' }, `${ordered.length} categor${ordered.length === 1 ? 'y' : 'ies'} · ${count} product${count === 1 ? '' : 's'}`))),
-        cards.length
-          ? ui.h('div', { class: 'stack' }, ...cards)
-          : ui.h('p', { class: 'hint' }, 'No category yet.'),
-        loose || null);
+        categoriesSummary,
+        tabsMap.length ? ui.h('div', {}, tabList, tabContent) : ui.h('p', { class: 'hint' }, 'No category yet.')
+      );
     }
     fillCategories();
 
