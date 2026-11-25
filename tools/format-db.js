@@ -43,10 +43,11 @@ async function run() {
   console.log('🚀 FORMATTING TURSO DATABASE (Leaving only admin credentials)...');
 
   // Get tables
-  const tables = await db.all("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_migrations' AND name != 'nafdac_catalog' AND name != 'sync_revisions'");
+  const tables = await db.all("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_\\_%' ESCAPE '\\' AND name != '_migrations' AND name != 'nafdac_catalog' AND name != 'sync_revisions'");
   
   const batches = [];
   for (const t of tables) {
+     if (t.name.startsWith('__')) continue;
      batches.push({ sql: `DELETE FROM "${t.name}"` });
   }
   await db.batch(batches, { foreignKeys: false });
