@@ -240,3 +240,9 @@ Electron Desktop Build Commands (Output: `dist/`)
 - Windows (Portable Directory): `npm run electron:build:win`
 - Linux (AppImage): `npm run electron:build:linux`
 - macOS (DMG & Zip): `npm run electron:build:mac`
+
+9. Database Provisioning & Deployment
+Every multi-client deployment must be cleanly seeded with an initial administrator account.
+- Command to format and seed admin: `node tools/format-db.js` (or via GitHub Actions `Format Turso Database`).
+- The default seeded admin credentials are **Username:** `admin`, **PIN:** `7000`.
+- All credentials must be privately rotated upon client handover.

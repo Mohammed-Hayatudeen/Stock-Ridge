@@ -261,14 +261,17 @@ Deployment/readiness does not prove login, native installation, physical offline
 
 ## 12. Provision the first real business and users
 
-Use the application's authorized setup/administration flow. Do not insert chart-of-account, branch, role, or user rows manually in SQL.
+**Every new deployment comes with a default seeded administrator account.**
+Use this account to access the authorized setup/administration flow. Do not insert chart-of-account, branch, role, or user rows manually in SQL.
 
-1. Create the client's first business.
-2. Select its vertical and give the first branch a real code.
-3. Create the owner/proprietor through the application.
-4. Create general managers, branch managers, and staff with the correct business/branch scope.
-5. Deliver real credentials privately and require appropriate credential rotation.
-6. Sign in as each role and verify visible businesses/branches and permissions.
+1. Format the database and seed the default configuration by running `node tools/format-db.js` (or via the "Format Turso Database" GitHub Action). This establishes the master `client_settings` and the fallback admin user.
+2. Sign in using the default admin credentials: **Username:** `admin` | **PIN:** `7000`.
+3. Create the client's first business.
+4. Select its vertical and give the first branch a real code.
+5. Create the owner/proprietor through the application.
+6. Create general managers, branch managers, and staff with the correct business/branch scope.
+7. Deliver real credentials privately to the owner, and **delete or change the default admin PIN immediately**.
+8. Sign in as each role and verify visible businesses/branches and permissions.
 
 Available vertical codes:
 
