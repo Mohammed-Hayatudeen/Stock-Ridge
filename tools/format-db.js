@@ -19,7 +19,21 @@ function hashPin(pin) {
 
 const idGen = () => crypto.randomBytes(8).toString('hex');
 
+function loadEnvFile() {
+  const file = path.join(__dirname, '..', '.env.deploy');
+  if (!fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
+    if (!m) continue;
+    const [, key, raw] = m;
+    if (process.env[key]) continue;
+    const value = raw.replace(/^["']|["']$/g, '');
+    if (value) process.env[key] = value;
+  }
+}
+
 async function run() {
+  loadEnvFile();
   const url = process.env.TURSO_DATABASE_URL;
   const authToken = process.env.TURSO_AUTH_TOKEN;
   if (!url || !authToken) throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required.');
@@ -44,17 +58,29 @@ async function run() {
   const insertCols = allCols.join(', ') + ', updated_at';
   const insertVals = allCols.map(() => '?').join(', ') + ", datetime('now')";
   const insertParams = allCols.map(k => DEFAULT_SETTINGS[k]);
-  await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+  try {
+    await db.run(`INSERT INTO client_settings (${insertCols}) VALUES (${insertVals})`, insertParams);
+  } catch (err) {
+    console.log("Client settings insert error:", err.message);
+  }
 
   // Insert Admin
   console.log('Inserting admin credentials...');
   const adminId = idGen();
-  await db.run(
-    "INSERT INTO users (id, username, full_name, role, is_global, pin_hash, is_active, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, 0, datetime('now'), datetime('now'))",
-    [adminId, 'admin', 'admin', 'ADMIN', 1, hashPin('7000')]
-  );
+  try {
+    await db.run(
+      "INSERT INTO users (id, username, full_name, role, pin_hash, is_active, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 0, datetime('now'), datetime('now'))",
+      [adminId, 'admin', 'admin', 'ADMIN', hashPin('7000')]
+    );
+  } catch(err) {
+    console.log("Admin insert error:", err.message);
+    throw err;
+  }
 
   console.log('✅ FORMAT COMPLETE. Admin user ready.');
 }
 
-run().catch(console.error);
+run().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
