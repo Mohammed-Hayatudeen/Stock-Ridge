@@ -1,0 +1,3 @@
+DB URL length: 54
+DB URL starts with: turso://stockridge-pharmaridge
+Token length: 348
