@@ -1,2 +1,7 @@
-Users: [ { id: '7ff09e1ddb58b33b', username: 'admin', is_active: 1 } ]
-Biz: 0
+User: {
+  id: '7ff09e1ddb58b33b',
+  username: 'admin',
+  pin_hash: 'pbkdf2$sha256$1000$j2vecVtR8TK9QorPKZ2pcQ$e63a31e4e23599bbdfac4be403199100b98403272aa8a7e9028ebf83ea9a7b2f',
+  is_active: 1
+}
+PIN OK? true
