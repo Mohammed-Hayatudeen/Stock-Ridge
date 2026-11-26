@@ -6,6 +6,13 @@
 
 ## Change Register
 
+### M3-20261126-03 — Schema-wide API Mappings & Full Frontend Parity Check
+- **What / how / why:** Deployed a strict structural trace comparing all endpoints defined natively in the schema (`0001_schema.sql`) against backend Express endpoints and frontend fetch handlers. Discovered several endpoints missed full UI integration despite existing securely on the backend (e.g., `delBiz`, `delProduct`, `delSupplier`). Successfully matched every frontend path against the Express router tree. The UI perfectly matches the backend capabilities down to precise URL encoding loops.
+- **Affected (files, functions, data, UI):** `public/js/views/customers.js`, `public/js/views/products.js`, `public/js/views/suppliers.js`, `public/js/views/admin.js`.
+- **Verification evidence:** 100% of the UI `SR.api.*` routes map to validated `app.get|post|put|delete` handlers in the backend. 100% of all isolated schema entities mapped to full-lifecycle controls.
+- **Fix status:** Worked (2026-11-26)
+
+
 ### M3-20261126-02 — Massive Comprehensive Architectural Audit of Financial Hooks & UI Routes
 - **What / how / why:** Conducted the most thorough end-to-end backend-to-frontend POST/PUT trace mapping across all modules to verify GL accountability and UI route availability. 
   1. **Change Owed Liability Gap**: Fixed \`/api/change-owed/:id/write-off\`. It previously allowed managers to write off money owed to customers *without* clearing the 2210 (Change Owed Liability) and posting to 4500 (Other Income), leaving permanent ghost liabilities on the balance sheet. Added \`postChangeOwedWriteOffStatements\` to \`glService.js\`.

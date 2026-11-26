@@ -547,6 +547,24 @@ function mount(app, base = '/api') {
     ctx.json({ ok: true, message: `Business ${row.name} and its branches have been deleted.` });
   });
 
+  
+  app.delete(`${base}/branches/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'OWNER')) throw new HttpError('Only an owner can delete a branch.', { status: 403, code: 'ROLE_REQUIRED' });
+
+    const id = String(ctx.req.param('id'));
+    const branch = await db.first('SELECT * FROM branches WHERE id = ? AND is_deleted = 0', [id]);
+    if (!branch) throw new HttpError('That branch does not exist.', { status: 404, code: 'BRANCH_NOT_FOUND' });
+
+    const activeUsers = await db.scalar("SELECT COUNT(*) FROM users WHERE branch_id = ? AND is_active = 1", [id]);
+    if (activeUsers > 0) throw new HttpError('Cannot delete a branch while users are assigned to it. Reassign or deactivate them first.', { status: 409, code: 'BRANCH_HAS_USERS' });
+
+    await db.run("UPDATE branches SET is_deleted = 1, is_active = 0, updated_at = datetime('now') WHERE id = ?", [id]);
+    await recordFromCtx(ctx, { action: 'BRANCH_DELETED', entityType: 'BRANCH', entityId: id, businessId: branch.business_id, before: branch, after: { is_deleted: 1 } });
+    ctx.json({ ok: true, message: `Branch ${branch.name} deleted.` });
+  });
+
   app.post(`${base}/branches`, async (ctx) => {
     const db = ctx.env.DB || ctx.env.db;
     const user = ctx.get('user');
