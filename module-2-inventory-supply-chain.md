@@ -5,6 +5,15 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+### M2-20261125-02 — Catalogue UI Polish & Unit Editing Fix (2026-11-25)
+- **What / how / why:** Resolved three final UI/UX friction points on the Catalogue screen:
+  1. The sticky filter toolbar (Search/Category) exhibited a visual glitch where scrolled cards became visible in the 18px gap *above* the toolbar (caused by `.main`'s `padding-top` scrollport constraint). Resolved natively in `app.css` by applying a massive negative upward `box-shadow` (cast from `var(--page)`) to `.section-dock` and `.settings-dock`, paired with an elevated `z-index` on `.page-head`, painting over the transparent gap without refactoring the global grid.
+  2. The "Terms" overview card lacked internal side padding because `ui.dataCard` uses `.card-body.tight` by default (which strips padding for full-bleed datagrids). Wrapped the internal `ui.kv` elements inside a manually padded container.
+  3. Editing any product resulted in `Unit "LOAF" needs a positive number of base units`. The underlying form serialization passed `quantity_in_base`, but `validateLadder()` inside `domain/uom.js` exclusively checked the camelCase `raw.quantityInBase`. Updated the domain validation to accept either property, unblocking all product updates.
+- **Affected (files, functions, data, UI):** `public/css/app.css`, `public/js/views/products.js` (Terms card), `domain/uom.js` (validateLadder).
+- **Verification evidence:** `npm test` validates. Sticky toolbars now solidly mask scrolled rows. Unit validation safely digests both snake and camel-cased property sets.
+- **Fix status:** Worked (2026-11-25)
+
 ### M2-20261125-01 — Catalogue UI Organization & Sticky Filters (2026-11-25)
 - **What / how / why:** Improved the Catalogue UI mapping to resolve screen crowding and fixed broken search interactions. The top filtering toolbar (Search & Category Dropdown) was converted to a sticky `.section-dock.row` to remain accessible while scrolling. The Search `qInput` lacked an event listener, causing searches to fail silently; injected `ui.debounceInput` to trigger live `load()` renders. Finally, re-architected the `paintShelves()` category cards—which previously stacked vertically, taking up massive viewport space—into a clean, horizontal Tab list (`role='tablist'`) synchronized bidirectionally with the Category Dropdown.
 - **Affected (files, functions, data, UI):** `public/js/views/products.js` (toolbar, qInput, catSel, paintShelves, addTab).

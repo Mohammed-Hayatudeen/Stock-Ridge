@@ -112,7 +112,7 @@ function validateLadder(levels) {
   for (let i = 0; i < rows.length; i += 1) {
     const raw = rows[i];
     const code = String(raw.code || '').trim().toUpperCase();
-    const qty = Number(raw.quantityInBase);
+    const qty = Number(raw.quantityInBase !== undefined ? raw.quantityInBase : raw.quantity_in_base);
     if (!code) return { ok: false, code: 'UNIT_CODE_REQUIRED', error: `Unit ${i + 1} needs a code (e.g. PIECE, CARTON).` };
     if (seen.has(code)) return { ok: false, code: 'DUPLICATE_UNIT_CODE', error: `Unit code "${code}" appears twice on the same product.` };
     seen.add(code);

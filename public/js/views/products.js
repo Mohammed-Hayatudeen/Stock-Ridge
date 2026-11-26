@@ -1199,7 +1199,7 @@
       const facts = ui.h('div', { class: 'stack' });
       facts.appendChild(ui.dataCard({
         title: 'Terms',
-        table: ui.kv([
+        table: ui.h('div', { style: { padding: '12px 18px 18px' } }, ui.kv([
           ['Base unit', p.base_unit_name],
           ['Category', data.category ? data.category.name : p.category_name],
           ['Brand', p.brand], ['Model', p.model_no],
@@ -1213,7 +1213,7 @@
           SR.state.moduleOn('expiry') ? ['Expiry tracked', Number(p.has_expiry) ? 'yes' : 'no'] : null,
           SR.state.moduleOn('installation') ? ['Needs installation', Number(p.requires_installation) ? 'yes' : 'no'] : null,
           ['Active', Number(p.is_active) ? 'yes' : 'NO — hidden from the POS'],
-        ].filter(Boolean)),
+        ].filter(Boolean))),
       }));
       if (variants.length) {
         facts.appendChild(ui.dataCard({
