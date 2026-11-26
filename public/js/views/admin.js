@@ -389,14 +389,6 @@
           load();
         } catch (e) { ui.apiError(e); }
       } }, 'Delete branch') : null;
-      const delBtn = !isNew && SR.state.atLeast('OWNER') ? ui.h('button', { class: 'btn text-bad', onClick: async () => {
-        if (!confirm(`Delete branch ${b.name} permanently?`)) return;
-        try {
-          await SR.api.del(`/api/branches/${encodeURIComponent(b.id)}`);
-          m.close();
-          load();
-        } catch (e) { ui.apiError(e); }
-      } }, 'Delete branch') : null;
       const m = ui.openModal({ title: isNew ? 'Open a branch' : b.name, body: form, footer: delBtn ? [cancel, delBtn, go] : [cancel, go], size: 'wide' });
 
       go.addEventListener('click', async () => {
@@ -588,6 +580,14 @@
 
       const cancel = ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel');
       const go = ui.h('button', { class: 'btn btn-primary', disabled: isNew }, isNew ? 'Create and provision' : 'Save changes');
+      const delBiz = !isNew && SR.state.atLeast('PLATFORM_ADMIN') ? ui.h('button', { class: 'btn text-bad', onClick: async () => {
+        if (!confirm(`Delete BUSINESS ${b.name} and all its branches permanently?`)) return;
+        try {
+          await SR.api.del(`/api/businesses/${encodeURIComponent(b.id)}`);
+          m.close();
+          load();
+        } catch (e) { ui.apiError(e); }
+      } }, 'Delete business') : null;
       const m = ui.openModal({ title: isNew ? 'Create a business' : b.name, body: form, footer: delBiz ? [cancel, delBiz, go] : [cancel, go], size: 'wide' });
       let suggestedBranchType = 'RETAIL';
       function suggestBranchType(profileCode) {
