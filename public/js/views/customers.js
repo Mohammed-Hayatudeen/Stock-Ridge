@@ -625,6 +625,22 @@
       });
     }
 
+    
+    async function delCustomer(c) {
+      if (Number(c.credit_balance) > 0) {
+        SR.app.flash(`${c.name} still owes ₦${Number(c.credit_balance).toLocaleString('en-NG')}. A debtor cannot be deleted — collect or write off the balance first.`);
+        return;
+      }
+      if (!confirm(`Are you sure you want to remove ${c.name}?`)) return;
+      try {
+        const res = await SR.api.del(`/api/customers/${encodeURIComponent(c.id)}`);
+        SR.app.flash(res.message || `${c.name} removed.`);
+        SR.app.navigate('/customers');
+      } catch (e) {
+        ui.alert(e.message);
+      }
+    }
+
     function writeOff(c, onDone) {
       const owed = Number(c.credit_balance) || 0;
       const wrapEl = ui.h('div', {});

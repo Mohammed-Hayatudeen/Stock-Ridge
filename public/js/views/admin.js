@@ -389,6 +389,14 @@
           load();
         } catch (e) { ui.apiError(e); }
       } }, 'Delete branch') : null;
+      const delBtn = !isNew && SR.state.atLeast('OWNER') ? ui.h('button', { class: 'btn text-bad', onClick: async () => {
+        if (!confirm(`Delete branch ${b.name} permanently?`)) return;
+        try {
+          await SR.api.del(`/api/branches/${encodeURIComponent(b.id)}`);
+          m.close();
+          load();
+        } catch (e) { ui.apiError(e); }
+      } }, 'Delete branch') : null;
       const m = ui.openModal({ title: isNew ? 'Open a branch' : b.name, body: form, footer: delBtn ? [cancel, delBtn, go] : [cancel, go], size: 'wide' });
 
       go.addEventListener('click', async () => {
