@@ -325,7 +325,18 @@
         ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/fleet') }, 'All vehicles'),
         mine ? ui.h('button', { class: 'btn btn-primary btn-sm', onClick: () => sellFrom(vehicle) }, 'Sell from this vehicle') : null,
         manager() ? ui.h('button', { class: 'btn btn-sm', onClick: () => assignDuty(vehicle, () => SR.app.navigate(`/fleet/${encodeURIComponent(vehicle.id)}`)) }, 'Assign') : null,
-        manager() ? ui.h('button', { class: 'btn btn-sm', onClick: () => recordExpense(vehicle, () => SR.app.navigate(`/fleet/${encodeURIComponent(vehicle.id)}`)) }, 'Record a cost') : null)));
+        manager() ? ui.h('button', { class: 'btn btn-sm', onClick: () => recordExpense(vehicle, () => SR.app.navigate(`/fleet/${encodeURIComponent(vehicle.id)}`)) }, 'Record a cost') : null,
+        manager() ? ui.h('button', { class: 'btn btn-sm text-bad', onClick: () => deleteVehicle(vehicle) }, 'Delete') : null)));
+
+    async function deleteVehicle(v) {
+      if (!confirm(`Are you sure you want to delete ${v.name}?`)) return;
+      try {
+        const res = await SR.api.del(`/api/dispatch/vehicles/${encodeURIComponent(v.id)}`);
+        SR.app.flash(res.message);
+        SR.app.navigate('/fleet');
+      } catch (err) { ui.apiError(err); }
+    }
+
 
     wrap.appendChild(ui.h('div', { class: 'card' },
       ui.h('div', { class: 'card-body' },

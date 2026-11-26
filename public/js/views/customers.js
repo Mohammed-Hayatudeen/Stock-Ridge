@@ -56,7 +56,7 @@
         ui.h('p', { class: 'sub' }, 'Contact records, credit limits and what is owed.')),
       ui.h('div', { class: 'actions' },
         ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openCreate() }, 'Add a customer'),
-        SR.state.atLeast && SR.state.atLeast('OWNER') ? ui.h('button', { class: 'btn btn-sm', onClick: () => openClass() }, 'Add a class') : null,
+        SR.state.atLeast && SR.state.atLeast('OWNER') ? ui.h('button', { class: 'btn btn-sm', onClick: () => manageClasses() }, 'Classes') : null,
         SR.exporter.buttons((format) => exportList(format)))));
 
     const tabs = ui.h('div', { class: 'tabs' });
@@ -239,17 +239,64 @@
       });
     }
 
-    function openClass() {
+    
+    async function manageClasses() {
+      const wrap = ui.h('div', { class: 'stack' });
+      wrap.appendChild(ui.loading('Loading classes…'));
+      const m = ui.openModal({ title: 'Customer Classes', body: wrap, size: 'wide', footer: [ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Close')] });
+
+      async function loadClasses() {
+        try {
+          const res = await SR.api.get('/api/customer-classes', { query: SR.state.query() });
+          const rows = res.data || [];
+          wrap.replaceChildren();
+
+          wrap.appendChild(ui.h('div', { class: 'actions', style: { marginBottom: '1rem' } }, 
+            ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openClass(null, loadClasses) }, 'Add a class')));
+
+          if (!rows.length) {
+            wrap.appendChild(ui.empty({ title: 'No classes', message: 'Group customers to apply standard discounts and terms.' }));
+          } else {
+            wrap.appendChild(ui.renderTable({
+              columns: [
+                { key: 'name', label: 'Class name' },
+                { key: 'discount_percent', label: 'Discount %', align: 'right' },
+                { key: 'payment_terms_days', label: 'Terms (Days)', align: 'right' },
+                { key: 'actions', label: '', align: 'right', render: (r) => ui.h('div', { class: 'btn-row' },
+                  ui.h('button', { class: 'btn btn-sm', onClick: () => openClass(r, loadClasses) }, 'Edit'),
+                  ui.h('button', { class: 'btn btn-sm text-bad', onClick: () => delClass(r) }, 'Delete')
+                )},
+              ],
+              rows
+            }));
+          }
+        } catch (err) { wrap.replaceChildren(ui.errorBlock(err)); }
+      }
+
+      async function delClass(r) {
+        if (!confirm(`Are you sure you want to delete ${r.name}? Customers in it will lose these terms.`)) return;
+        try {
+          const res = await SR.api.del(`/api/customer-classes/${encodeURIComponent(r.id)}`);
+          ui.toast(res.message);
+          loadClasses();
+        } catch (err) { ui.apiError(err); }
+      }
+
+      loadClasses();
+    }
+
+    function openClass(existing, after) {
       const wrapEl = ui.h('div', {});
+      const ex = existing || {};
       wrapEl.appendChild(ui.h('div', { class: 'form-grid' },
-        ui.field({ label: 'Name', name: 'name', required: true }),
-        ui.field({ label: 'Discount %', name: 'discount_pct', type: 'number', min: '0', max: '100', step: '0.01', value: '0' }),
-        ui.field({ label: 'Credit allowed', name: 'credit_allowed', type: 'checkbox' }),
-        ui.field({ label: 'Default credit limit (₦)', name: 'default_credit_limit', type: 'number', min: '0', step: '0.01', value: '0' }),
-        ui.field({ label: 'Payment terms (days)', name: 'payment_terms_days', type: 'number', min: '0', max: '365', step: '1', value: '0' })));
+        ui.field({ label: 'Name', name: 'name', required: true, value: ex.name || '' }),
+        ui.field({ label: 'Discount %', name: 'discount_pct', type: 'number', min: '0', max: '100', step: '0.01', value: String(ex.discount_percent || 0) }),
+        ui.field({ label: 'Credit allowed', name: 'credit_allowed', type: 'checkbox', value: ex.credit_allowed ? 'on' : '' }),
+        ui.field({ label: 'Default credit limit (₦)', name: 'default_credit_limit', type: 'number', min: '0', step: '0.01', value: String(ex.default_credit_limit || 0) }),
+        ui.field({ label: 'Payment terms (days)', name: 'payment_terms_days', type: 'number', min: '0', max: '365', step: '1', value: String(ex.payment_terms_days || 0) })));
       wrapEl.appendChild(ui.h('p', { class: 'hint' }, 'A class that cannot buy on credit cannot carry a limit or payment terms. Allow credit, or leave both at zero.'));
       const m = ui.openModal({
-        title: 'Add a customer class',
+        title: existing ? 'Edit class' : 'Add a class',
         body: wrapEl,
         footer: [
           ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel'),
@@ -269,17 +316,23 @@
               if (SR.app.guardWorkingBusiness && !SR.app.guardWorkingBusiness()) return;
               ev.currentTarget.disabled = true;
               try {
-                const created = await SR.api.post('/api/customer-classes', {
+                const payload = {
                   name: v.name,
-                  discount_pct: Number(v.discount_pct) || 0,
+                  discount_percent: Number(v.discount_pct) || 0,
                   credit_allowed: creditAllowed ? 1 : 0,
                   default_credit_limit: creditAllowed ? limit : 0,
                   payment_terms_days: creditAllowed ? terms : 0,
                   business_id: SR.state.activeBusinessId,
-                }, { query: SR.state.query({}) });
-                ui.ok((created && created.message) || `${v.name} added.`);
+                };
+                let created;
+                if (existing) {
+                  created = await SR.api.put(`/api/customer-classes/${encodeURIComponent(existing.id)}`, payload, { query: SR.state.query({}) });
+                } else {
+                  created = await SR.api.post('/api/customer-classes', payload, { query: SR.state.query({}) });
+                }
+                ui.ok((created && created.message) || `${v.name} saved.`);
                 m.close();
-                load();
+                if (after) after(); else load();
               } catch (err) {
                 ui.apiError(err);
                 ev.currentTarget.disabled = false;

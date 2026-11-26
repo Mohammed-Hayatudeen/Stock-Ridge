@@ -1290,6 +1290,29 @@ function mount(app, base = '/api') {
     ctx.json({ ok: true, majors: [], data, unfiled });
   });
 
+  
+  app.delete(`${base}/categories/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can delete a category.', { status: 403, code: 'ROLE_REQUIRED' });
+    const id = String(ctx.req.param('id'));
+    const category = await db.first('SELECT * FROM product_categories WHERE id = ? AND is_deleted = 0', [id]);
+    if (!category) throw new HttpError('That category does not exist.', { status: 404, code: 'CATEGORY_NOT_FOUND' });
+    
+    // Check if it's in use
+    const count = await db.scalar('SELECT COUNT(*) FROM products WHERE category_id = ? AND is_deleted = 0', [id]);
+    if (count > 0) {
+      throw new HttpError(`Cannot delete ${category.name} because it contains ${count} product(s). Move them to another category first.`, { status: 409, code: 'CATEGORY_IN_USE' });
+    }
+
+    await db.run("UPDATE product_categories SET is_deleted = 1, is_active = 0, updated_at = datetime('now') WHERE id = ?", [id]);
+    await recordFromCtx(ctx, {
+      action: 'CATEGORY_DELETED', entityType: 'CATEGORY', entityId: id,
+      businessId: category.business_id, before: { name: category.name }, after: { is_deleted: 1 },
+    });
+    ctx.json({ ok: true, message: `${category.name} removed.` });
+  });
+
   app.put(`${base}/categories/:id`, async (ctx) => {
     const db = ctx.env.DB || ctx.env.db;
     const user = ctx.get('user');
@@ -1425,6 +1448,65 @@ function mount(app, base = '/api') {
     const lists = await db.all(`SELECT pl.*, (SELECT COUNT(*) FROM price_list_items i WHERE i.price_list_id = pl.id AND i.is_deleted = 0) AS item_count
       FROM price_lists pl WHERE ${where.join(' AND ')} ORDER BY pl.priority DESC, pl.name`, params);
     ctx.json({ ok: true, data: lists });
+  });
+
+  
+  app.post(`${base}/price-lists`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can create a price list.', { status: 403, code: 'ROLE_REQUIRED' });
+
+    const body = await ctx.req.json();
+    const name = strField(body.name, { field: 'Name', maxLength: 100, required: true });
+    const priority = numField(body.priority, { field: 'Priority', min: 0, max: 100, whole: true }) || 0;
+    
+    // Usually business-scoped or system-wide
+    const businessId = ctx.get('scope').businessIds ? [...ctx.get('scope').businessIds][0] : null;
+
+    const id = require('../../domain/crypto').newId();
+    await db.run(`INSERT INTO price_lists (id, business_id, name, priority, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      [id, businessId, name, priority]);
+
+    await recordFromCtx(ctx, { action: 'PRICE_LIST_CREATED', entityType: 'PRICE_LIST', entityId: id, after: { name, priority } });
+    ctx.json({ ok: true, id, message: `Price list ${name} created.` });
+  });
+
+  app.put(`${base}/price-lists/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can edit a price list.', { status: 403, code: 'ROLE_REQUIRED' });
+    
+    const id = String(ctx.req.param('id'));
+    const list = await db.first('SELECT * FROM price_lists WHERE id = ? AND is_deleted = 0', [id]);
+    if (!list) throw new HttpError('That price list does not exist.', { status: 404, code: 'PRICE_LIST_NOT_FOUND' });
+
+    const body = await ctx.req.json();
+    const name = strField(body.name, { field: 'Name', maxLength: 100 }) || list.name;
+    const priority = body.priority !== undefined ? numField(body.priority, { field: 'Priority', min: 0, max: 100, whole: true }) : list.priority;
+
+    await db.run(`UPDATE price_lists SET name = ?, priority = ?, updated_at = datetime('now') WHERE id = ?`, [name, priority, id]);
+    
+    await recordFromCtx(ctx, { action: 'PRICE_LIST_UPDATED', entityType: 'PRICE_LIST', entityId: id, before: list, after: { name, priority } });
+    ctx.json({ ok: true, message: `Price list ${name} updated.` });
+  });
+
+  app.delete(`${base}/price-lists/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can delete a price list.', { status: 403, code: 'ROLE_REQUIRED' });
+    
+    const id = String(ctx.req.param('id'));
+    const list = await db.first('SELECT * FROM price_lists WHERE id = ? AND is_deleted = 0', [id]);
+    if (!list) throw new HttpError('That price list does not exist.', { status: 404, code: 'PRICE_LIST_NOT_FOUND' });
+
+    const count = await db.scalar('SELECT COUNT(*) FROM customer_classes WHERE price_list_id = ? AND is_deleted = 0', [id]);
+    if (count > 0) throw new HttpError(`Cannot delete ${list.name} because it is assigned to ${count} customer class(es).`, { status: 409, code: 'PRICE_LIST_IN_USE' });
+
+    await db.run("UPDATE price_lists SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?", [id]);
+    await db.run("UPDATE price_list_items SET is_deleted = 1, updated_at = datetime('now') WHERE price_list_id = ?", [id]);
+
+    await recordFromCtx(ctx, { action: 'PRICE_LIST_DELETED', entityType: 'PRICE_LIST', entityId: id, before: list, after: { is_deleted: 1 } });
+    ctx.json({ ok: true, message: `Price list ${list.name} deleted.` });
   });
 
   app.get(`${base}/price-lists/:id/items`, async (ctx) => {
@@ -1694,6 +1776,27 @@ function mount(app, base = '/api') {
       count: market.ITEMS.length,
       note: 'No prices. Set a price after you add the item. A serial number stays off until you turn it on for that product.',
     });
+  });
+
+  
+  app.delete(`${base}/suppliers/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can delete a supplier.', { status: 403, code: 'ROLE_REQUIRED' });
+    const id = String(ctx.req.param('id'));
+    const supplier = await db.first('SELECT * FROM suppliers WHERE id = ? AND is_deleted = 0', [id]);
+    if (!supplier) throw new HttpError('That supplier does not exist.', { status: 404, code: 'SUPPLIER_NOT_FOUND' });
+    
+    if (Number(supplier.balance_owed) > 0) {
+      throw new HttpError(`Cannot delete ${supplier.name} because we still owe them ₦${Number(supplier.balance_owed).toLocaleString('en-NG')}.`, { status: 409, code: 'SUPPLIER_HAS_BALANCE' });
+    }
+
+    await db.run("UPDATE suppliers SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?", [id]);
+    await recordFromCtx(ctx, {
+      action: 'SUPPLIER_DELETED', entityType: 'SUPPLIER', entityId: id,
+      businessId: supplier.business_id, before: { name: supplier.name }, after: { is_deleted: 1 },
+    });
+    ctx.json({ ok: true, message: `${supplier.name} removed.` });
   });
 
   app.post(`${base}/market-catalogue/adopt`, async (ctx) => {

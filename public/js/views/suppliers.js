@@ -286,6 +286,7 @@
         ui.h('div', { class: 'actions' },
           ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/suppliers') }, 'Back'),
           ui.h('button', { class: 'btn btn-sm', onClick: () => edit(s) }, 'Edit'),
+          SR.state.atLeast('MANAGER') ? ui.h('button', { class: 'btn btn-sm text-bad', onClick: () => delSupplier(s) }, 'Delete') : null,
           SR.state.atLeast('MANAGER') ? ui.h('button', { class: 'btn btn-sm', onClick: () => SR.app.navigate('/purchase-orders') }, 'New order') : null,
           SR.state.atLeast('MANAGER') ? ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openPay(s, load) }, 'Pay supplier') : null));
 
