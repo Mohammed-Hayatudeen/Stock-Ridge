@@ -360,6 +360,20 @@
       }));
     }
 
+    
+    async function delSupplier(s) {
+      if (Number(s.balance_owed) > 0) {
+        ui.warn(`Cannot delete ${s.name} because we still owe them ₦${Number(s.balance_owed).toLocaleString('en-NG')}.`);
+        return;
+      }
+      if (!confirm(`Are you sure you want to remove ${s.name}?`)) return;
+      try {
+        const res = await SR.api.del(`/api/suppliers/${encodeURIComponent(s.id)}`);
+        SR.app.flash(res.message);
+        SR.app.navigate('/suppliers');
+      } catch (err) { ui.apiError(err); }
+    }
+
     function edit(s) {
       const wrapEl = ui.h('div', {});
       wrapEl.appendChild(ui.h('div', { class: 'form-grid' },

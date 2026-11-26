@@ -319,8 +319,7 @@
     }
     fillCategories();
 
-    async 
-  async function managePriceLists() {
+    async function managePriceLists() {
     const wrap = ui.h('div', { class: 'stack' });
     wrap.appendChild(ui.loading('Loading price lists…'));
     const m = ui.openModal({ title: 'Wholesale price lists', body: wrap, size: 'wide', footer: [ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Close')] });
@@ -393,7 +392,7 @@
     loadPL();
   }
 
-    function addCategory() {
+    async function addCategory() {
       const wrapEl = ui.h('div', {});
       const shops = (SR.state.businesses && SR.state.businesses()) || [];
       const verticals = [];
@@ -1123,6 +1122,18 @@
       });
     });
   }
+
+  
+    async function delProduct(p) {
+      if (!confirm(`Are you sure you want to remove ${p.name}?`)) return;
+      try {
+        const res = await SR.api.del(`/api/products/${encodeURIComponent(p.id)}`);
+        SR.app.flash(res.message || `${p.name} removed.`);
+        SR.app.navigate('/products');
+      } catch (e) {
+        ui.alert(e.message);
+      }
+    }
 
   async function addSharedToShop(product) {
     if (!product || !product.sku) { ui.warn('That row has no SKU to copy.'); return; }
