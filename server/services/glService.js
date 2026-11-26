@@ -594,13 +594,13 @@ function postTransferStatements({ transfer, business, fromBranch, toBranch, valu
  * to know whether the furniture shop or the electronics shop is actually
  * making money.
  */
-function postIntercompanyTransferStatements({ transfer, fromBusiness, toBusiness, fromBranch, toBranch, value, accountIds, user }) {
+function postIntercompanyTransferStatements({ transfer, fromBusiness, toBusiness, fromBranch, toBranch, value, fromAccountIds, toAccountIds, user }) {
   const amount = round2(Number(value) || 0);
   if (amount <= 0) return [];
   return [
     ...buildEntry({
       businessId: fromBusiness.id, branchId: fromBranch.id, sourceType: 'INTERCOMPANY', sourceId: transfer.id,
-      description: `Intercompany sale to ${toBusiness.name}, transfer ${transfer.reference}`, postedBy: user && user.id, accountIds,
+      description: `Intercompany sale to ${toBusiness.name}, transfer ${transfer.reference}`, postedBy: user && user.id, accountIds: fromAccountIds,
       lines: [
         { accountCode: '7000', debit: amount, description: `Due from ${toBusiness.name}` },
         { accountCode: '4000', credit: amount, description: 'Intercompany revenue at transfer price' },
@@ -608,9 +608,9 @@ function postIntercompanyTransferStatements({ transfer, fromBusiness, toBusiness
     }),
     ...buildEntry({
       businessId: toBusiness.id, branchId: toBranch.id, sourceType: 'INTERCOMPANY', sourceId: transfer.id,
-      description: `Intercompany purchase from ${fromBusiness.name}, transfer ${transfer.reference}`, postedBy: user && user.id, accountIds,
+      description: `Intercompany purchase from ${fromBusiness.name}, transfer ${transfer.reference}`, postedBy: user && user.id, accountIds: toAccountIds,
       lines: [
-        { accountCode: '1100', debit: amount, description: 'Inventory received at transfer price' },
+        { accountCode: '1110', debit: amount, description: 'Goods in transit from intercompany transfer' },
         { accountCode: '7010', credit: amount, description: `Due to ${fromBusiness.name}` },
       ],
     }),
@@ -1109,14 +1109,85 @@ function postHeldDeposit({ business, branch, agreementId, amount, method, user, 
   });
 }
 
+/**
+ * A transfer arriving at its destination branch.
+ *
+ * Clears the 1110 (Goods in Transit) holding account and recognises the inventory
+ * in 1100 (Inventory) at the receiving branch, keeping the balance sheet true.
+ */
+function postTransferReceivedStatements({ transfer, business, fromBranch, toBranch, value, accountIds, user }) {
+  const amount = round2(Number(value) || 0);
+  if (amount <= 0) return [];
+  return buildEntry({
+    businessId: business.id, branchId: toBranch.id, sourceType: 'TRANSFER', sourceId: transfer.id,
+    description: `Stock transfer ${transfer.reference} received from ${fromBranch.name}`, postedBy: user && user.id, accountIds,
+    lines: [
+      { accountCode: '1100', debit: amount, branchId: toBranch.id, description: 'Inventory received' },
+      { accountCode: '1110', credit: amount, branchId: toBranch.id, description: 'Goods in transit, cleared' },
+    ],
+  });
+}
+
+/**
+ * A cancelled transfer returning to the sending branch.
+ *
+ * Reverses the dispatch entry: clears the 1110 (Goods in Transit) holding account
+ * at the destination branch and returns the inventory to 1100 at the sending branch.
+ */
+function postTransferCancelledStatements({ transfer, business, fromBranch, toBranch, value, accountIds, user }) {
+  const amount = round2(Number(value) || 0);
+  if (amount <= 0) return [];
+  return buildEntry({
+    businessId: business.id, branchId: fromBranch.id, sourceType: 'TRANSFER', sourceId: transfer.id,
+    description: `Stock transfer ${transfer.reference} cancelled; returned to ${fromBranch.name}`, postedBy: user && user.id, accountIds,
+    lines: [
+      { accountCode: '1100', debit: amount, branchId: fromBranch.id, description: 'Inventory returned' },
+      { accountCode: '1110', credit: amount, branchId: toBranch.id, description: 'Goods in transit, cancelled' },
+    ],
+  });
+}
+
 module.exports = {
   CHART_OF_ACCOUNTS, ACCOUNT_BY_CODE, CASH_ACCOUNTS, EXPENSE_CATEGORY_ACCOUNTS, ADJUSTMENT_ACCOUNTS,
   seedChartStatements, loadAccountCodes, buildEntry,
   postSaleStatements, reverseSaleStatements, postPurchaseReceiptStatements, postHeldDeposit,
   postExpenseStatements, postAdjustmentStatements, postTransferStatements,
-  postIntercompanyTransferStatements, postBankingStatements,
+  postIntercompanyTransferStatements,
+  postTransferReceivedStatements,
+  postTransferCancelledStatements,
+  postIntercompanyTransferCancelledStatements, postBankingStatements,
   postCashMoveStatements, postCashOverShortStatements, postCashPayoutStatements, postCashAgainstAccountStatements,
   postDebtorPaymentStatements, postCreditorPaymentStatements,
   postWarrantyStatements, postInstalmentInterestStatements,
   trialBalance, profitAndLoss, rentalBooks, balanceSheet, booksByCategory,
 };
+
+
+/**
+ * A cancelled INTER-BUSINESS transfer.
+ *
+ * Reverses the AR/AP and revenue bookings, and clears the 1110 holding account
+ * at the destination business.
+ */
+function postIntercompanyTransferCancelledStatements({ transfer, fromBusiness, toBusiness, fromBranch, toBranch, value, fromAccountIds, toAccountIds, user }) {
+  const amount = round2(Number(value) || 0);
+  if (amount <= 0) return [];
+  return [
+    ...buildEntry({
+      businessId: fromBusiness.id, branchId: fromBranch.id, sourceType: 'TRANSFER', sourceId: transfer.id,
+      description: `Cancelled intercompany sale to ${toBusiness.name}, transfer ${transfer.reference}`, postedBy: user && user.id, accountIds: fromAccountIds,
+      lines: [
+        { accountCode: '4000', debit: amount, description: 'Intercompany revenue reversed' },
+        { accountCode: '7000', credit: amount, description: `Due from ${toBusiness.name} reversed` },
+      ],
+    }),
+    ...buildEntry({
+      businessId: toBusiness.id, branchId: toBranch.id, sourceType: 'TRANSFER', sourceId: transfer.id,
+      description: `Cancelled intercompany purchase from ${fromBusiness.name}, transfer ${transfer.reference}`, postedBy: user && user.id, accountIds: toAccountIds,
+      lines: [
+        { accountCode: '7010', debit: amount, description: `Due to ${fromBusiness.name} reversed` },
+        { accountCode: '1110', credit: amount, description: 'Goods in transit reversed' },
+      ],
+    }),
+  ];
+}
