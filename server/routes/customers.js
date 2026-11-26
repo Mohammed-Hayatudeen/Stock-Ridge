@@ -724,6 +724,43 @@ function mount(app, base = '/api') {
   });
 
   /** Write off a bad debt. Irreversible in effect, so it needs owner authority and a reason. */
+  
+  app.put(`${base}/customer-classes/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can edit a customer class.', { status: 403, code: 'ROLE_REQUIRED' });
+    const id = String(ctx.req.param('id'));
+    const before = await db.first('SELECT * FROM customer_classes WHERE id = ? AND is_deleted = 0', [id]);
+    if (!before) throw new HttpError('That class does not exist.', { status: 404, code: 'CLASS_NOT_FOUND' });
+    
+    const body = await ctx.req.json();
+    const name = strField(body.name, { field: 'Name', maxLength: 100 });
+    const discount = body.discount_percent !== undefined ? numField(body.discount_percent, { field: 'Discount', min: 0, max: 100 }) : before.discount_percent;
+    const priceListId = body.price_list_id !== undefined ? (body.price_list_id || null) : before.price_list_id;
+
+    await db.run(`UPDATE customer_classes SET name = COALESCE(?, name), discount_percent = ?, price_list_id = ?, updated_at = datetime('now') WHERE id = ?`,
+      [name, discount, priceListId, id]);
+    
+    await recordFromCtx(ctx, { action: 'CUSTOMER_CLASS_UPDATED', entityType: 'CUSTOMER_CLASS', entityId: id, before, after: body });
+    ctx.json({ ok: true, message: `Class updated.` });
+  });
+
+  app.delete(`${base}/customer-classes/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can delete a customer class.', { status: 403, code: 'ROLE_REQUIRED' });
+    const id = String(ctx.req.param('id'));
+    const row = await db.first('SELECT * FROM customer_classes WHERE id = ? AND is_deleted = 0', [id]);
+    if (!row) throw new HttpError('That class does not exist.', { status: 404, code: 'CLASS_NOT_FOUND' });
+    
+    const count = await db.scalar('SELECT COUNT(*) FROM customers WHERE customer_class_id = ? AND is_deleted = 0', [id]);
+    if (count > 0) throw new HttpError(`Cannot delete this class. ${count} customer(s) are in it.`, { status: 409, code: 'CLASS_IN_USE' });
+
+    await db.run("UPDATE customer_classes SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?", [id]);
+    await recordFromCtx(ctx, { action: 'CUSTOMER_CLASS_DELETED', entityType: 'CUSTOMER_CLASS', entityId: id, before: row, after: { is_deleted: 1 } });
+    ctx.json({ ok: true, message: `${row.name} class removed.` });
+  });
+
   app.post(`${base}/customers/:id/write-off`, async (ctx) => {
     const db = ctx.env.DB || ctx.env.db;
     const user = ctx.get('user');

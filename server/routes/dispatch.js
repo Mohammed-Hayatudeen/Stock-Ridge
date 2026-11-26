@@ -1165,6 +1165,24 @@ function mount(app, base = '/api') {
     ctx.json({ ok: true, data: rows });
   });
 
+  
+  app.delete(`${base}/dispatch/vehicles/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'MANAGER')) throw new HttpError('Only a manager can delete a vehicle.', { status: 403, code: 'ROLE_REQUIRED' });
+    const id = String(ctx.req.param('id'));
+    const row = await db.first('SELECT * FROM delivery_vehicles WHERE id = ? AND is_deleted = 0', [id]);
+    if (!row) throw new HttpError('That vehicle does not exist.', { status: 404, code: 'VEHICLE_NOT_FOUND' });
+
+    // Check if it's currently tied to an active duty
+    const active = await db.scalar("SELECT COUNT(*) FROM vehicle_duties WHERE vehicle_id = ? AND status = 'IN_TRANSIT'", [id]);
+    if (active > 0) throw new HttpError('Cannot delete a vehicle that is currently out on duty. End the duty first.', { status: 409, code: 'VEHICLE_ON_DUTY' });
+
+    await db.run("UPDATE delivery_vehicles SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?", [id]);
+    await recordFromCtx(ctx, { action: 'VEHICLE_DELETED', entityType: 'VEHICLE', entityId: id, businessId: row.business_id, before: { name: row.name }, after: { is_deleted: 1 } });
+    ctx.json({ ok: true, message: `${row.name} (${row.registration}) removed.` });
+  });
+
   app.post(`${base}/dispatch/duties`, idempotent(async (ctx) => {
     const db = ctx.env.DB || ctx.env.db;
     const user = ctx.get('user');

@@ -82,6 +82,7 @@
         ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openCreate() }, 'Add a product'),
         SR.state.moduleOn('dispensing') ? ui.h('button', { class: 'btn btn-sm', onClick: () => openRegister() }, 'Controlled register') : null,
         canOrganize() ? ui.h('button', { class: 'btn btn-sm', onClick: () => addCategory() }, 'Add a category') : null,
+        canOrganize() ? ui.h('button', { class: 'btn btn-sm', onClick: () => managePriceLists() }, 'Price lists') : null,
         SR.exporter.buttons((format) => exportList(format)),
         ui.h('button', { class: 'btn btn-sm', onClick: () => labelSheet() }, 'Print labels'))));
 
@@ -153,6 +154,18 @@
         body: wrapEl,
         footer: [
           ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel'),
+          ui.h('button', { class: 'btn text-bad', onClick: async (ev) => {
+            if (!confirm(`Are you sure you want to delete "${category.name}"?`)) return;
+            ev.currentTarget.disabled = true;
+            try {
+              const res = await SR.api.del(`/api/categories/${encodeURIComponent(category.id)}`);
+              ui.ok(res.message);
+              m.close();
+              if (state.category === category.id) state.category = '';
+              await fillCategories();
+              load();
+            } catch (err) { ui.apiError(err); ev.currentTarget.disabled = false; }
+          } }, 'Delete'),
           ui.h('button', {
             class: 'btn btn-primary',
             onClick: async (ev) => {
@@ -306,7 +319,81 @@
     }
     fillCategories();
 
-    async function addCategory() {
+    async 
+  async function managePriceLists() {
+    const wrap = ui.h('div', { class: 'stack' });
+    wrap.appendChild(ui.loading('Loading price lists…'));
+    const m = ui.openModal({ title: 'Wholesale price lists', body: wrap, size: 'wide', footer: [ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Close')] });
+    
+    async function loadPL() {
+      try {
+        const res = await SR.api.get('/api/price-lists', { query: SR.state.query() });
+        const rows = res.data || [];
+        wrap.replaceChildren();
+        
+        wrap.appendChild(ui.h('div', { class: 'actions', style: { marginBottom: '1rem' } }, 
+          ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => editPL(null) }, 'Create a list')));
+        
+        if (!rows.length) {
+          wrap.appendChild(ui.empty({ title: 'No price lists', message: 'Create a wholesale tier like "Distributors" or "Key Accounts".' }));
+        } else {
+          wrap.appendChild(ui.renderTable({
+            columns: [
+              { key: 'name', label: 'List name' },
+              { key: 'priority', label: 'Priority', align: 'right' },
+              { key: 'item_count', label: 'Items', align: 'right' },
+              { key: 'actions', label: '', align: 'right', render: (r) => ui.h('div', { class: 'btn-row' },
+                ui.h('button', { class: 'btn btn-sm', onClick: () => editPL(r) }, 'Edit'),
+                ui.h('button', { class: 'btn btn-sm text-bad', onClick: () => delPL(r) }, 'Delete')
+              )},
+            ],
+            rows
+          }));
+        }
+      } catch (err) { wrap.replaceChildren(ui.errorBlock(err)); }
+    }
+    
+    async function delPL(r) {
+      if (!confirm(`Are you sure you want to delete ${r.name}? Customers assigned to it will fall back to retail.`)) return;
+      try {
+        const res = await SR.api.del(`/api/price-lists/${encodeURIComponent(r.id)}`);
+        ui.toast(res.message);
+        loadPL();
+      } catch (err) { ui.apiError(err); }
+    }
+    
+    function editPL(r) {
+      const eWrap = ui.h('div', { class: 'form-grid' },
+        ui.field({ label: 'Name', name: 'name', required: true, value: r ? r.name : '' }),
+        ui.field({ label: 'Priority', name: 'priority', type: 'number', min: '0', max: '100', value: r ? r.priority : '0' })
+      );
+      const em = ui.openModal({
+        title: r ? 'Edit price list' : 'New price list',
+        body: eWrap,
+        footer: [
+          ui.h('button', { class: 'btn', onClick: () => em.close() }, 'Cancel'),
+          ui.h('button', { class: 'btn btn-primary', onClick: async (ev) => {
+            const v = ui.readFormStrings(eWrap);
+            if (!v.name) { ui.warn('Name required.'); return; }
+            ev.currentTarget.disabled = true;
+            try {
+              if (r) {
+                await SR.api.put(`/api/price-lists/${encodeURIComponent(r.id)}`, v);
+              } else {
+                await SR.api.post('/api/price-lists', Object.assign(v, SR.state.query()));
+              }
+              em.close();
+              loadPL();
+            } catch(err) { ui.apiError(err); ev.currentTarget.disabled = false; }
+          }}, 'Save')
+        ]
+      });
+    }
+    
+    loadPL();
+  }
+
+    function addCategory() {
       const wrapEl = ui.h('div', {});
       const shops = (SR.state.businesses && SR.state.businesses()) || [];
       const verticals = [];

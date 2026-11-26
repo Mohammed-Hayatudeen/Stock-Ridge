@@ -531,6 +531,22 @@ function mount(app, base = '/api') {
     });
   });
 
+  
+  app.delete(`${base}/businesses/:id`, async (ctx) => {
+    const db = ctx.env.DB || ctx.env.db;
+    const user = ctx.get('user');
+    if (!atLeast(user.role, 'PLATFORM_ADMIN')) throw new HttpError('Only a platform admin can delete a business.', { status: 403, code: 'ROLE_REQUIRED' });
+
+    const id = String(ctx.req.param('id'));
+    const row = await db.first('SELECT * FROM businesses WHERE id = ? AND is_deleted = 0', [id]);
+    if (!row) throw new HttpError('That business does not exist.', { status: 404, code: 'BUSINESS_NOT_FOUND' });
+
+    await db.run("UPDATE businesses SET is_deleted = 1, is_active = 0, updated_at = datetime('now') WHERE id = ?", [id]);
+    await db.run("UPDATE branches SET is_deleted = 1, is_active = 0, updated_at = datetime('now') WHERE business_id = ?", [id]);
+    await recordFromCtx(ctx, { action: 'BUSINESS_DELETED', entityType: 'BUSINESS', entityId: id, before: row, after: { is_deleted: 1 } });
+    ctx.json({ ok: true, message: `Business ${row.name} and its branches have been deleted.` });
+  });
+
   app.post(`${base}/branches`, async (ctx) => {
     const db = ctx.env.DB || ctx.env.db;
     const user = ctx.get('user');
