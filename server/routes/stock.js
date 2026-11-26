@@ -1011,14 +1011,13 @@ function mount(app, base = '/api') {
         ? glService.postIntercompanyTransferStatements({
           transfer: { id, reference },
           fromBusiness: { id: from.business_id, name: from.name }, toBusiness: { id: to.business_id, name: to.name },
-          fromBranch: from, toBranch: to, value: transferValue, accountIds, user,
+          fromBranch: from, toBranch: to, value: transferValue, fromAccountIds: accountIds, toAccountIds, user,
         })
         : glService.postTransferStatements({
           transfer: { id, reference }, business: { id: from.business_id },
           fromBranch: from, toBranch: to, value: transferValue, accountIds, user,
         });
       for (const st of statements) tx.queue(st.sql, st.params);
-      void toAccountIds;
     });
 
     await recordFromCtx(ctx, {
@@ -1131,6 +1130,16 @@ function mount(app, base = '/api') {
         ]);
         tx.queue('UPDATE stock_transfer_items SET to_batch_id = ? WHERE id = ?', [toBatchId, String(item.id)]);
       }
+      
+      // We only recognise the value that actually arrived THIS time (receivedValue),
+      // not the cumulative total (receivedValueTotal), so a second partial delivery
+      // does not post the first delivery's value again.
+      const statements = glService.postTransferReceivedStatements({
+          transfer, business: { id: transfer.to_business_id },
+          fromBranch: { name: fromBranchName }, toBranch: to, value: receivedValue, accountIds, user,
+      });
+      for (const st of statements) tx.queue(st.sql, st.params);
+
       // PARTIALLY_RECEIVED IS A REAL STATE, NOT A TYPO IN THE SCHEMA. The first booking of a
       // delivery that arrived short leaves the transfer open so the rest can be booked when it
       // turns up; only a booking that closes every line marks it RECEIVED. Writing RECEIVED on a
@@ -1212,6 +1221,7 @@ function mount(app, base = '/api') {
     const from = await db.first('SELECT * FROM branches WHERE id = ?', [fromBranchId]);
     let returnedUnits = 0;
     let returnedValue = 0;
+    const toBranch = await db.first('SELECT * FROM branches WHERE id = ?', [transfer.to_branch_id]);
     await db.transaction(async (tx) => {
       for (const item of items) {
         const alreadyOn = Number(item.quantity_received) || 0;
@@ -1240,6 +1250,20 @@ function mount(app, base = '/api') {
       }
       tx.queue(`UPDATE stock_transfers SET status = 'CANCELLED', notes = COALESCE(?, notes), updated_at = datetime('now') WHERE id = ?`,
         [reason ? `Cancelled by ${user.full_name || user.username}: ${reason}` : null, id]);
+        
+      const fromAccountIds = await glService.loadAccountCodes(db, transfer.from_business_id);
+      const toAccountIds = String(transfer.from_business_id) === String(transfer.to_business_id) ? fromAccountIds : await glService.loadAccountCodes(db, transfer.to_business_id);
+      
+      const statements = String(transfer.from_business_id) === String(transfer.to_business_id)
+        ? glService.postTransferCancelledStatements({
+          transfer, business: { id: transfer.from_business_id },
+          fromBranch: from, toBranch: { id: transfer.to_branch_id }, value: returnedValue, accountIds: fromAccountIds, user,
+        })
+        : glService.postIntercompanyTransferCancelledStatements({
+          transfer, fromBusiness: { id: transfer.from_business_id, name: from.name }, toBusiness: { id: transfer.to_business_id, name: toBranch ? toBranch.name : 'another branch' },
+          fromBranch: from, toBranch: { id: transfer.to_branch_id }, value: returnedValue, fromAccountIds, toAccountIds, user,
+        });
+      for (const st of statements) tx.queue(st.sql, st.params);
     });
 
     await recordFromCtx(ctx, {
