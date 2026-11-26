@@ -5,6 +5,13 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+
+### M3-20261126-01 — Enforce full GL coverage for inventory transfers
+- **What / how / why:** Discovered a massive ledger gap where intra-company and inter-company stock transfers were never completely recorded in the GL. When stock was dispatched, `1110 Goods in Transit` was debited (or worse, for inter-company, `1100 Inventory` was immediately debited before goods arrived, and to the wrong business's chart of accounts). When stock was received or cancelled, NO entries were generated, stranding asset value in `1110` forever and robbing the receiving branch of its inventory. Wrote `postTransferReceivedStatements` and `postTransferCancelledStatements` (with intercompany variants) and bound them to `/api/transfers/:id/receive` and `/api/transfers/:id/cancel`. Fixed the inter-company payload generation to properly respect both `fromAccountIds` and `toAccountIds`.
+- **Affected (files, functions, data, UI):** `server/services/glService.js`, `server/routes/stock.js`.
+- **Verification evidence:** Traced and validated that all `1110` and `1100` accounts balance to zero across initiation, cancellation, and receipt phases. 
+- **Fix status:** Worked (2026-11-26)
+
 ### M3-20261107-01 — Negative Bounds Margin Calculation Refactoring (2026-11-07)
 - **What / how / why:** Discovered that the reporting aggregation for `grossMarginPct` strictly limited percentage margin calculations to instances where `netRevenue > 0`. In massive enterprise monthly queries experiencing heavy return volumes or negative adjustments, negative bounds were being completely zeroed out instead of rendering an accurate negative margin. Swapped the hard `> 0` guard to a mathematically precise `!== 0` check in `server/routes/reports.js` and `server/routes/dashboard.js`, preserving mathematical rounding precision while correctly mapping negative PnL states.
 - **Affected (files, functions, data, UI):** `server/routes/reports.js`, `server/routes/dashboard.js`.
