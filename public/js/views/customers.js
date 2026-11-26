@@ -431,6 +431,9 @@
           Number(c.credit_balance) > 0 && SR.state.atLeast && SR.state.atLeast('OWNER')
             ? ui.h('button', { class: 'btn btn-sm', onClick: () => writeOff(c, load) }, 'Write off')
             : null,
+          SR.state.atLeast && SR.state.atLeast('MANAGER')
+            ? ui.h('button', { class: 'btn btn-sm text-bad', onClick: () => delCustomer(c) }, 'Delete')
+            : null,
           ui.h('button', { class: 'btn btn-sm', onClick: () => statement(c, ledgerRows) }, 'Statement'))));
 
       host.appendChild(ui.h('div', { class: 'grid grid-4' },

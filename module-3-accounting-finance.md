@@ -5,6 +5,16 @@
 |----|------|---------|------------|-------------------------|------------------|
 
 ## Change Register
+
+### M3-20261126-02 — Massive Comprehensive Architectural Audit of Financial Hooks & UI Routes
+- **What / how / why:** Conducted the most thorough end-to-end backend-to-frontend POST/PUT trace mapping across all modules to verify GL accountability and UI route availability. 
+  1. **Change Owed Liability Gap**: Fixed \`/api/change-owed/:id/write-off\`. It previously allowed managers to write off money owed to customers *without* clearing the 2210 (Change Owed Liability) and posting to 4500 (Other Income), leaving permanent ghost liabilities on the balance sheet. Added \`postChangeOwedWriteOffStatements\` to \`glService.js\`.
+  2. **Deposit Cancellation Misclassification**: Fixed \`/api/deposits/:id/cancel\`. When a deposit was forfeited, it posted the forfeiture as \`4010\` (Wholesale Revenue) which incorrectly inflated the gross trading margin. It now explicitly posts to \`4500\` (Other Income) because no physical goods were ever exchanged.
+  3. **Frontend UI Sync**: Identified that \`DELETE /api/customers/:id\` and \`DELETE /api/products/:id\` existed natively in the backend API router but were missing from the UI views. Injected \`delCustomer\` and \`delProduct\` into the frontend (using \`ui.h\` components) nested safely behind \`SR.state.atLeast('MANAGER')\` constraints to preserve system structure. Evaluated UI for optimal tab rendering across \`customers.js\`, \`products.js\`, \`instalments.js\`, and \`reports.js\`. 
+- **Affected (files, functions, data, UI):** \`server/routes/changeOwed.js\`, \`server/routes/afterSales.js\`, \`server/services/glService.js\`, \`public/js/views/customers.js\`, \`public/js/views/products.js\`.
+- **Verification evidence:** All minor and major backend mutations directly map to \`glService\` and have matching frontend representations. Liability write-offs and cancellations properly close out \`2210\` and \`2200\` without phantom margins.
+- **Fix status:** Worked (2026-11-26)
+
 ### M3-20261107-01 — Negative Bounds Margin Calculation Refactoring (2026-11-07)
 - **What / how / why:** Discovered that the reporting aggregation for `grossMarginPct` strictly limited percentage margin calculations to instances where `netRevenue > 0`. In massive enterprise monthly queries experiencing heavy return volumes or negative adjustments, negative bounds were being completely zeroed out instead of rendering an accurate negative margin. Swapped the hard `> 0` guard to a mathematically precise `!== 0` check in `server/routes/reports.js` and `server/routes/dashboard.js`, preserving mathematical rounding precision while correctly mapping negative PnL states.
 - **Affected (files, functions, data, UI):** `server/routes/reports.js`, `server/routes/dashboard.js`.

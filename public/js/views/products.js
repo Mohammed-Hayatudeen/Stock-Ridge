@@ -1177,6 +1177,9 @@
             } catch (err) { ui.apiError(err); }
           } }, Number(p.requires_serial) ? 'Serial off' : 'Serial on'),
           ui.h('button', { class: 'btn btn-sm', onClick: () => { productForm(Object.assign({}, data.product || data, { units: data.units, measures: data.measures })).then((ok) => { if (ok) load(); }); } }, 'Edit'),
+          SR.state.atLeast && SR.state.atLeast('MANAGER')
+            ? ui.h('button', { class: 'btn btn-sm text-bad', onClick: () => delProduct(p) }, 'Delete')
+            : null,
           ui.h('button', { class: 'btn btn-sm', onClick: () => SR.barcode.previewLabel(labelItem) }, 'Label')));
 
       if (offline) overview.push(ui.h('div', { class: 'alert alert-warn' }, 'Offline — from this device\'s last sync.'));

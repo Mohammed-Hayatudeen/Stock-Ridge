@@ -1076,7 +1076,7 @@ function mount(app, base = '/api') {
           description: `Deposit forfeited by ${deposit.customer_name}: ${reason}`, postedBy: String(user.id), accountIds,
           lines: [
             { accountCode: '2200', debit: forfeitAmount, description: 'Liability cleared' },
-            { accountCode: '4010', credit: forfeitAmount, description: 'Forfeited deposit recognised as other revenue' },
+            { accountCode: '4500', credit: forfeitAmount, description: 'Forfeited deposit recognised as other income' },
           ],
         })) tx.queue(st.sql, st.params);
       }

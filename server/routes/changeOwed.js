@@ -395,13 +395,7 @@ function mount(app, base = '/api') {
       throw new HttpError(`A write-off needs a reason of at least ${MIN_REASON} characters — it is how the business explains money it chose not to pay back, and "gone" explains nothing to the owner reading it next year.`, { status: 400, code: 'REASON_REQUIRED', fields: { reason: `Say why this is being written off, in at least ${MIN_REASON} characters.` } });
     }
 
-    await db.run(`UPDATE change_owed SET status = 'WRITTEN_OFF', redeemed_at = datetime('now'), redeemed_by = ?,
-        notes = TRIM(COALESCE(notes, '') || ?), updated_at = datetime('now')
-      WHERE id = ? AND status = 'OUTSTANDING'`, [
-      String(user.id),
-      ` | Written off by ${user.full_name || user.username}: ${reason}`,
-      id,
-    ]);
+
 
     await recordFromCtx(ctx, {
       action: 'CHANGE_OWED_WRITTEN_OFF', entityType: 'CHANGE_OWED', entityId: id,
@@ -410,14 +404,29 @@ function mount(app, base = '/api') {
       after: { status: 'WRITTEN_OFF', amount: round2(row.amount), claim_code: row.claim_code, customer: row.customer_name, reason },
     });
 
+    // A write-off means the shop is keeping money it originally booked as a liability.
+    // To clear the balance sheet, we debit the liability (2210) and credit Other Income (4500).
+    const { loadAccountCodes, postChangeOwedWriteOffStatements } = require('../services/glService');
+    const accountIds = await loadAccountCodes(db, row.business_id);
+    await db.transaction(async (tx) => {
+      tx.queue(`UPDATE change_owed SET status = 'WRITTEN_OFF', redeemed_at = datetime('now'), redeemed_by = ?,
+          notes = TRIM(COALESCE(notes, '') || ?), updated_at = datetime('now')
+        WHERE id = ? AND status = 'OUTSTANDING'`, [
+        String(user.id),
+        ` | Written off by ${user.full_name || user.username}: ${reason}`,
+        id,
+      ]);
+      const statements = postChangeOwedWriteOffStatements({
+        claimId: id, branchId: String(row.branch_id), businessId: String(row.business_id),
+        amount: row.amount, customerName: row.customer_name, accountIds, user,
+      });
+      for (const st of statements) tx.queue(st.sql, st.params);
+    });
+
     ctx.json({
       ok: true, id, status: 'WRITTEN_OFF', amount: round2(row.amount), reason,
       customer_name: row.customer_name, claim_code: row.claim_code,
-      message: `₦${round2(row.amount).toLocaleString('en-NG')} owed to ${row.customer_name} was written off. The reason is recorded against your name.`,
-      // NO LEDGER ENTRY, AND THAT IS DELIBERATE: the liability was already recognised
-      // when the sale was made, and writing it off converts it to income the shop has
-      // decided not to chase. Posting it here would be a second, wrong entry; the
-      // period's accountant decides where a written-off liability lands.
+      message: `₦${round2(row.amount).toLocaleString('en-NG')} owed to ${row.customer_name} was written off to Other Income. The reason is recorded against your name.`,
     });
   });
 }
