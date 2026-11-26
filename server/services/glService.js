@@ -594,6 +594,27 @@ function postTransferStatements({ transfer, business, fromBranch, toBranch, valu
  * to know whether the furniture shop or the electronics shop is actually
  * making money.
  */
+
+/**
+ * A change-owed claim written off by the shop.
+ *
+ * Reduces the 2210 (Change Owed Liability) and recognises the difference as
+ * 4500 (Other Income), so the liability does not sit on the balance sheet
+ * forever after the shop has decided not to pay it.
+ */
+function postChangeOwedWriteOffStatements({ claimId, branchId, businessId, amount, customerName, accountIds, user }) {
+  const value = round2(Number(amount) || 0);
+  if (value <= 0) return [];
+  return buildEntry({
+    businessId, branchId, sourceType: 'MANUAL', sourceId: claimId,
+    description: `Change owed written off: ${customerName}`, postedBy: user && user.id, accountIds,
+    lines: [
+      { accountCode: '2210', debit: value, description: 'Liability cleared by write-off' },
+      { accountCode: '4500', credit: value, description: 'Change forfeited to income' },
+    ],
+  });
+}
+
 function postIntercompanyTransferStatements({ transfer, fromBusiness, toBusiness, fromBranch, toBranch, value, fromAccountIds, toAccountIds, user }) {
   const amount = round2(Number(value) || 0);
   if (amount <= 0) return [];
@@ -1156,7 +1177,7 @@ module.exports = {
   postTransferReceivedStatements,
   postTransferCancelledStatements,
   postIntercompanyTransferCancelledStatements, postBankingStatements,
-  postCashMoveStatements, postCashOverShortStatements, postCashPayoutStatements, postCashAgainstAccountStatements,
+  postCashMoveStatements, postCashOverShortStatements, postCashPayoutStatements, postCashAgainstAccountStatements, postChangeOwedWriteOffStatements,
   postDebtorPaymentStatements, postCreditorPaymentStatements,
   postWarrantyStatements, postInstalmentInterestStatements,
   trialBalance, profitAndLoss, rentalBooks, balanceSheet, booksByCategory,
