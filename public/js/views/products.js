@@ -760,8 +760,9 @@
       'How this product is bought, held and sold. Level 1 is always exactly one base unit. Add a level for a pack (a carton of 48), a roll of 100 metres, or a 600-piece trip of blocks. Every quantity the system records is converted to the base unit.'));
     const ladderList = ui.h('div', { class: 'stack' });
     const ladder = (editing && Array.isArray(base.units) && base.units.length)
-      ? base.units.map((u) => ({ code: u.code || u.unit_code, name: u.name, quantity_in_base: u.quantity_in_base, is_base: Boolean(Number(u.is_base)) }))
+      ? base.units.map((u) => ({ code: u.code || u.unit_code, name: u.name, quantity_in_base: u.quantity_in_base !== undefined ? u.quantity_in_base : u.quantityInBase, is_base: Boolean(Number(u.is_base)) }))
       : [{ code: 'PIECE', name: base.base_unit_name || 'Piece', quantity_in_base: 1, is_base: true }];
+    ladder.sort((a, b) => Number(a.quantity_in_base || 0) - Number(b.quantity_in_base || 0));
     function paintLadder() {
       ladderList.replaceChildren();
       ladder.forEach((level, i) => {
@@ -827,6 +828,24 @@
                 ladder[0].code = chosenMeasure.code;
                 ladder[0].name = chosenMeasure.name;
               }
+              // Validate ladder
+              ladder.sort((a, b) => Number(a.quantity_in_base || 0) - Number(b.quantity_in_base || 0));
+              const validLadder = ladder.filter((l) => l.code && l.code.trim());
+              if (!validLadder.length) {
+                ui.alert('Please add at least a base unit.'); return;
+              }
+              for (let i = 0; i < validLadder.length; i++) {
+                const l = validLadder[i];
+                const qty = i === 0 ? 1 : Number(l.quantity_in_base);
+                if (!Number.isFinite(qty) || qty <= 0) {
+                  ui.alert(`Please enter a positive number of base units for "${l.code || 'Unit'}" (level ${i+1}).`);
+                  return;
+                }
+              }
+              // Replace empty ladder with validLadder so empty inputs are dropped instead of crashing backend
+              ladder.length = 0;
+              ladder.push(...validLadder);
+
               const payload = Object.assign({
                 branch_id: SR.state.activeBranchId,
                 business_id: SR.state.activeBusinessId,

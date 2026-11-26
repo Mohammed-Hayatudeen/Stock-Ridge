@@ -722,7 +722,7 @@
       function unitsOf(p) {
         return (p && Array.isArray(p.units) ? p.units : [])
           .filter((u) => !Number(u.is_deleted))
-          .sort((a, b) => Number(a.quantity_in_base) - Number(b.quantity_in_base));
+          .sort((a, b) => Number(a.quantity_in_base !== undefined ? a.quantity_in_base : a.quantityInBase) - Number(b.quantity_in_base !== undefined ? b.quantity_in_base : b.quantityInBase));
       }
 
       function priceFields(factor) {
@@ -741,7 +741,7 @@
         if (!sel) return;
         sel.replaceChildren();
         for (const u of ladder) {
-          const factor = Number(u.quantity_in_base) || 1;
+          const factor = Number(u.quantity_in_base !== undefined ? u.quantity_in_base : u.quantityInBase) || 1;
           const opt = document.createElement('option');
           opt.value = u.code;
           opt.textContent = factor > 1
@@ -774,7 +774,7 @@
             ladder = unitsOf(detail);
           } catch (err) {
             ladder = (await SR.store.all('product_units', { where: (u) => !Number(u.is_deleted) && String(u.product_id) === String(p.id) }).catch(() => []))
-              .map((u) => ({ code: u.code, name: u.name, quantity_in_base: Number(u.quantity_in_base) }))
+              .map((u) => ({ code: u.code, name: u.name, quantity_in_base: Number(u.quantity_in_base !== undefined ? u.quantity_in_base : u.quantityInBase) }))
               .sort((a, b) => a.quantity_in_base - b.quantity_in_base);
           }
         }

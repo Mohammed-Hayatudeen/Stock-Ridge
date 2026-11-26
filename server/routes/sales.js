@@ -71,7 +71,7 @@ function normaliseLine(raw, index) {
     quantity: Number(raw.quantity),
     unitCode: raw.unit_code || raw.unitCode ? String(raw.unit_code || raw.unitCode).toUpperCase() : null,
     discountPct: raw.discount_pct != null || raw.discountPct != null ? Number(raw.discount_pct ?? raw.discountPct) : null,
-    discountAmount: raw.discount_amount != null || raw.discountAmount != null ? Number(raw.discount_amount ?? raw.discountAmount) : null,
+    discountAmount: raw.discount_amount != null || raw.discountAmount != null || raw.line_discount != null || raw.lineDiscount != null ? Number(raw.discount_amount ?? raw.discountAmount ?? raw.line_discount ?? raw.lineDiscount) : null,
     discountReason: raw.discount_reason || raw.discountReason || null,
     manualPrice: raw.manual_price != null || raw.manualPrice != null ? Number(raw.manual_price ?? raw.manualPrice) : null,
     notes: raw.notes || null,

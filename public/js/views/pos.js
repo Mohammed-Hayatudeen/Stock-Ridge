@@ -1285,14 +1285,14 @@
       }
       const sellable = units
         .filter((u) => !Number(u.is_deleted) && Number(u.is_sellable) !== 0)
-        .sort((a, b) => Number(a.quantity_in_base) - Number(b.quantity_in_base));
+        .sort((a, b) => Number(a.quantity_in_base !== undefined ? a.quantity_in_base : a.quantityInBase) - Number(b.quantity_in_base !== undefined ? b.quantity_in_base : b.quantityInBase));
       if (!sellable.length) { ui.toast(`${line.name} has no sellable unit set up. Add one under Catalogue.`, { type: 'err', ms: 8000 }); return; }
 
       const basePrice = Number(line.listPrice) / (Number(line.unitFactor) > 0 ? Number(line.unitFactor) : 1);
       const body = ui.h('div', { class: 'stack' });
       const m = ui.openModal({ title: `${line.name} — sold in what?`, body, size: 'narrow' });
       for (const u of sellable) {
-        const factor = Number(u.quantity_in_base) || 1;
+        const factor = Number(u.quantity_in_base !== undefined ? u.quantity_in_base : u.quantityInBase) || 1;
         const stock = line.onHandBase != null ? line.onHandBase / factor : null;
         body.appendChild(ui.h('button', {
           class: `pos-hit ${u.code === line.unitCode ? 'is-active' : ''}`,

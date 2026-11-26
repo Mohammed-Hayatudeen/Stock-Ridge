@@ -536,7 +536,8 @@ async function prepare(db, {
     // The unit price is the fee for the window, so quantity times price is
     // what the customer pays for the use, and the deposit is not in it.
     const override = overrides.get(`${product.id}|${variant ? variant.id : ''}`) || overrides.get(`${product.id}|`);
-    const manual = manualPriceOverrides[i] != null ? manualPriceOverrides[i] : (line.manualPrice != null ? line.manualPrice : null);
+    const manualOverride = manualPriceOverrides[String(product.id)];
+    const manual = manualOverride != null ? (manualOverride.to != null ? manualOverride.to : manualOverride) : (line.manualPrice != null ? line.manualPrice : null);
     let pricing;
     let holdRate = null;
     let holdDeposit = 0;
