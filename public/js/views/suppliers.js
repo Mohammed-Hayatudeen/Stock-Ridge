@@ -370,7 +370,7 @@
       if (!confirm(`Are you sure you want to remove ${s.name}?`)) return;
       try {
         const res = await SR.api.del(`/api/suppliers/${encodeURIComponent(s.id)}`);
-        SR.app.flash(res.message);
+        ui.toast(res.message);
         SR.app.navigate('/suppliers');
       } catch (err) { ui.apiError(err); }
     }

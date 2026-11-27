@@ -253,7 +253,7 @@
           wrap.replaceChildren();
 
           wrap.appendChild(ui.h('div', { class: 'actions', style: { marginBottom: '1rem' } }, 
-            ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openClass(null, loadClasses) }, 'Add a class')));
+            ui.h('button', { class: 'btn btn-sm btn-primary', onClick: () => openClass(null, manageClasses) }, 'Add a class')));
 
           if (!rows.length) {
             wrap.appendChild(ui.empty({ title: 'No classes', message: 'Group customers to apply standard discounts and terms.' }));
@@ -264,7 +264,7 @@
                 { key: 'discount_percent', label: 'Discount %', align: 'right' },
                 { key: 'payment_terms_days', label: 'Terms (Days)', align: 'right' },
                 { key: 'actions', label: '', align: 'right', render: (r) => ui.h('div', { class: 'btn-row' },
-                  ui.h('button', { class: 'btn btn-sm', onClick: () => openClass(r, loadClasses) }, 'Edit'),
+                  ui.h('button', { class: 'btn btn-sm', onClick: () => openClass(r, manageClasses) }, 'Edit'),
                   ui.h('button', { class: 'btn btn-sm text-bad', onClick: () => delClass(r) }, 'Delete')
                 )},
               ],
@@ -300,7 +300,7 @@
         title: existing ? 'Edit class' : 'Add a class',
         body: wrapEl,
         footer: [
-          ui.h('button', { class: 'btn', onClick: () => m.close() }, 'Cancel'),
+          ui.h('button', { class: 'btn', onClick: () => { m.close(); if (after) after(); } }, 'Cancel'),
           ui.h('button', {
             class: 'btn btn-primary',
             onClick: async (ev) => {
@@ -629,16 +629,16 @@
     
     async function delCustomer(c) {
       if (Number(c.credit_balance) > 0) {
-        SR.app.flash(`${c.name} still owes ₦${Number(c.credit_balance).toLocaleString('en-NG')}. A debtor cannot be deleted — collect or write off the balance first.`);
+        ui.toast(`${c.name} still owes ₦${Number(c.credit_balance).toLocaleString('en-NG')}. A debtor cannot be deleted — collect or write off the balance first.`);
         return;
       }
       if (!confirm(`Are you sure you want to remove ${c.name}?`)) return;
       try {
         const res = await SR.api.del(`/api/customers/${encodeURIComponent(c.id)}`);
-        SR.app.flash(res.message || `${c.name} removed.`);
+        ui.toast(res.message || `${c.name} removed.`);
         SR.app.navigate('/customers');
       } catch (e) {
-        ui.alert(e.message);
+        ui.warn(e.message);
       }
     }
 

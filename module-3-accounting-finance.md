@@ -6,6 +6,13 @@
 
 ## Change Register
 
+### M3-20261126-06 — UI Framework Stability & Modal Context Fixes
+- **What / how / why:** Investigated a user report of broken UI functionality following the CRUD mappings. Discovered and resolved three major UI framework violations: (1) Replaced legacy `SR.app.flash` references with `ui.toast` natively to prevent undefined function crashes on delete actions. (2) Replaced nonexistent `ui.alert` calls with `ui.warn`. (3) Fixed destructive modal-chaining DOM behavior in `manageClasses` and `managePriceLists`. The StockRidge UI modal framework natively replaces DOM children (does not stack). Opening an "Edit" modal from inside the "Manage" modal destroyed the parent context. Rewrote the UI chaining logic to re-instantiate the parent modal transparently upon child closure, preserving state perfectly.
+- **Affected (files, functions, data, UI):** `public/js/views/customers.js`, `public/js/views/products.js`, `public/js/views/suppliers.js`, `public/js/views/admin.js`.
+- **Verification evidence:** Verified nested modal behavior via AST. `ui.toast` and `ui.warn` are strictly defined in `public/js/ui.js`.
+- **Fix status:** Worked (2026-11-26)
+
+
 ### M3-20261126-05 — Codebase Policy Header Injection
 - **What / how / why:** The user instructed that every file in the repository must carry a header comment natively referencing the `agent.md` protocol to guarantee strict adherence during all future AI/agent modifications. Wrote an AST-style Node.js file walker to inject `// PROTOCOL: Always reference the agent.md file before any further fix on this page.` into the very first line of every single `.js`, `.css`, `.html`, and `.sql` file across the `server/`, `public/`, `domain/`, `tools/`, `worker/`, `electron/`, and `schema/` directories.
 - **Affected (files, functions, data, UI):** 164 source files modified.

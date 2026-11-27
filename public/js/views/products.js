@@ -371,7 +371,7 @@
         title: r ? 'Edit price list' : 'New price list',
         body: eWrap,
         footer: [
-          ui.h('button', { class: 'btn', onClick: () => em.close() }, 'Cancel'),
+          ui.h('button', { class: 'btn', onClick: () => { em.close(); managePriceLists(); } }, 'Cancel'),
           ui.h('button', { class: 'btn btn-primary', onClick: async (ev) => {
             const v = ui.readFormStrings(eWrap);
             if (!v.name) { ui.warn('Name required.'); return; }
@@ -383,7 +383,7 @@
                 await SR.api.post('/api/price-lists', Object.assign(v, SR.state.query()));
               }
               em.close();
-              loadPL();
+              managePriceLists();
             } catch(err) { ui.apiError(err); ev.currentTarget.disabled = false; }
           }}, 'Save')
         ]
@@ -919,13 +919,13 @@
               ladder.sort((a, b) => Number(a.quantity_in_base || 0) - Number(b.quantity_in_base || 0));
               const validLadder = ladder.filter((l) => l.code && l.code.trim());
               if (!validLadder.length) {
-                ui.alert('Please add at least a base unit.'); return;
+                ui.warn('Please add at least a base unit.'); return;
               }
               for (let i = 0; i < validLadder.length; i++) {
                 const l = validLadder[i];
                 const qty = i === 0 ? 1 : Number(l.quantity_in_base);
                 if (!Number.isFinite(qty) || qty <= 0) {
-                  ui.alert(`Please enter a positive number of base units for "${l.code || 'Unit'}" (level ${i+1}).`);
+                  ui.warn(`Please enter a positive number of base units for "${l.code || 'Unit'}" (level ${i+1}).`);
                   return;
                 }
               }
@@ -1129,10 +1129,10 @@
       if (!confirm(`Are you sure you want to remove ${p.name}?`)) return;
       try {
         const res = await SR.api.del(`/api/products/${encodeURIComponent(p.id)}`);
-        SR.app.flash(res.message || `${p.name} removed.`);
+        ui.toast(res.message || `${p.name} removed.`);
         SR.app.navigate('/products');
       } catch (e) {
-        ui.alert(e.message);
+        ui.warn(e.message);
       }
     }
 

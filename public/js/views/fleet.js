@@ -333,7 +333,7 @@
       if (!confirm(`Are you sure you want to delete ${v.name}?`)) return;
       try {
         const res = await SR.api.del(`/api/dispatch/vehicles/${encodeURIComponent(v.id)}`);
-        SR.app.flash(res.message);
+        ui.toast(res.message);
         SR.app.navigate('/fleet');
       } catch (err) { ui.apiError(err); }
     }
