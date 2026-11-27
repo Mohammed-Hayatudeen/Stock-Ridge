@@ -1,3 +1,4 @@
+-- PROTOCOL: Always reference the agent.md file before any further fix on this page.
 -- 0008_turso_sync_optimizations.sql
 -- Optimizing Turso Free Tier reads by adding covering indexes for sync delta polling
 

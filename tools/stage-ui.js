@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 
 // Copies the shop screens into build/ so the archive does not depend on a

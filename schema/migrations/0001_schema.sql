@@ -1,3 +1,4 @@
+-- PROTOCOL: Always reference the agent.md file before any further fix on this page.
 -- StockRidge schema.
 -- One file. It replaces the numbered schema migrations 0001 through 0024,
 -- except the reference catalogues, which stay in their own files because

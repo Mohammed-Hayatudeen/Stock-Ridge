@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 // The till is online only when the shop itself answered. A browser "offline"
 // event, a missing network icon, or one timed-out screen is not that answer.
 (function (root, factory) {

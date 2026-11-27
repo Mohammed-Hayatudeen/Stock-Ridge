@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 // Which screens and fields a business actually uses.
 //
 // A profile already says what it sells and which switches are on. The shell

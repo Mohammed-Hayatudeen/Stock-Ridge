@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // tools/stamp-build.js — ONE CACHE KEY PER DEPLOY

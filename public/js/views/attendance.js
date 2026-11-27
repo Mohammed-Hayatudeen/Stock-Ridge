@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // public/js/views/attendance.js — WHO IS AT WORK, AND WHERE THEY CLOCKED IN

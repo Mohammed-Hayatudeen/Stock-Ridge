@@ -1,3 +1,4 @@
+-- PROTOCOL: Always reference the agent.md file before any further fix on this page.
 -- 0004_sync_indexes — indexes the incremental pull walks on
 -- Every PULLABLE table that is filtered by business or branch must have an
 -- index that matches what the pull asks: business_id and branch_id together

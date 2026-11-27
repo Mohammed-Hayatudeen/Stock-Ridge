@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // server/services/saleIssues.js — A FLAGGED SALE, FIXED AND CLEARED

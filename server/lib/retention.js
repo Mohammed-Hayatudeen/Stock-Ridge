@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // server/lib/retention.js — WHAT THE SHOP FORGETS, AND WHAT IT NEVER FORGETS

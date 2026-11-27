@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // server/routes/customers.js — WHO OWES WHAT, AND WHAT THEY EARN

@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // public/sw.js — THE SERVICE WORKER: WHAT IS CACHED, AND WHAT IS NOT

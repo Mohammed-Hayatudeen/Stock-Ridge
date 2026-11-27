@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 // =====================================================================
 // server/routes/attendance.js — WHO IS AT WORK, AND WHERE THEY SAID SO
 // =====================================================================

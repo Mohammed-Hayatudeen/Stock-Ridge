@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // The page may call these methods and nothing else. No Node, no database
 // file path the page can choose, no Turso token.

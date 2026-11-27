@@ -1,3 +1,4 @@
+-- PROTOCOL: Always reference the agent.md file before any further fix on this page.
 -- nigerian market
 -- Shared master catalogue. business_id is NULL, so every shop on a deployment
 -- can see these goods. Nothing here belongs to a demo business, and nothing

@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // public/js/views/till.js — THE DRAWER, THE SAFE, AND THE COUNT

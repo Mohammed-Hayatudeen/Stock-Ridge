@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 const fs = require('fs');
 const syncJs = fs.readFileSync('public/js/sync.js', 'utf8');
 const pullTables = syncJs.match(/const PULL_TABLES = \[\s*([^\]]+)\]/)[1]

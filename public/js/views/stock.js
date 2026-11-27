@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // public/js/views/stock.js — WHAT IS ON THE SHELF, AND FOUR WAYS IT MOVES

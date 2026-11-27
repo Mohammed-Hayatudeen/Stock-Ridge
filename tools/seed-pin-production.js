@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 
 // Runtime-only reconstruction of the operator-supplied sample sign-in sheet.

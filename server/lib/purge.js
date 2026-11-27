@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // server/lib/purge.js — WHAT A CLEANUP REMOVES, TABLE BY TABLE

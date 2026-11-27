@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // public/js/theme.js — LIGHT / DARK, REMEMBERED PER DEVICE

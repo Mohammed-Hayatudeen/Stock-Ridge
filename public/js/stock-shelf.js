@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // The shelf on this device must move the same way the shop moves it.
 // Stock is counted in base units. A sale takes free stock first (quantity

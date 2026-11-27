@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // server/routes/health.js — LIVENESS, READINESS AND THE PWA MANIFEST
