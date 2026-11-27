@@ -89,6 +89,7 @@
   let lastPushAt = null;
   let lastPullAt = null;
   let lastError = null;
+  let aloneInBusiness = false; // Smart polling protocol
 
   // -------------------------------------------------------------------
   // PUSH
@@ -116,12 +117,14 @@
     const device = SR.device.current();
     if (!device || !device.id) return { ok: false };
     const waiting = await SR.store.outboxCount().catch(() => 0);
-    return SR.api.post('/api/sync/heartbeat', {
+    const res = await SR.api.post('/api/sync/heartbeat', {
       device_id: device.id,
       app_version: SR.APP_VERSION,
       pending_push_count: waiting,
       branch_id: branchId,
-    }, { query: { branch_id: branchId }, quiet: true });
+    }, { query: { branch_id: branchId }, quiet: true }).catch(() => ({ ok: false }));
+    if (res.ok && res.alone !== undefined) aloneInBusiness = Boolean(res.alone);
+    return res;
   }
 
   async function push({ batchSize = 100 } = {}) {
@@ -1485,7 +1488,7 @@
         if (!SR.api.isOnline()) await SR.api.probe({ force: true });
         if (!SR.api.isOnline()) {
           refresh = false;
-          await pull({ full });
+          if (!aloneInBusiness || full || catchUp) await pull({ full });
           return { ok: false, offline: true };
         }
         emit('change', status());
@@ -1517,10 +1520,18 @@
           await heartbeat().catch(() => {});
           return { ok: false, push: pushResult, pull: pullResult, refresh: false };
         }
-        try { pullResult = await pull({ full }); } catch (err) {
+        try { 
+          // Smart polling protocol: if this is the only device online and it's just a background interval, 
+          // skip the pull entirely to dramatically slash DB reads.
+          if (aloneInBusiness && !full && !catchUp && !pushResult.applied) {
+            pullResult = { ok: true, rows: 0, alone: true, skipped: true };
+          } else {
+            pullResult = await pull({ full }); 
+          }
+        } catch (err) {
           if (!(SR._catchingUp && sessionBlipError(err))) await rememberPullError(pullFailureReason(err));
         }
-        if (!(pullResult && pullResult.ok)) await heartbeat().catch(() => {});
+        if (!(pullResult && pullResult.ok) || pullResult.skipped) await heartbeat().catch(() => {});
         if (pullResult && pullResult.rows) refresh = true;
         if (SR.api.isOnline()) {
           if (pullResult && pullResult.ok) {
