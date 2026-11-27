@@ -6,6 +6,13 @@
 
 ## Change Register
 
+### M3-20261126-07 — CSS Parser Crash Resolution
+- **What / how / why:** Addressed a severe UI presentation crash affecting the login page and all application views (missing input boundaries, missing buttons, text-only layout). The previous `agent.md` protocol enforcement script injected a JS-style `//` comment at the top of the `app.css` file. CSS parsers do not support `//` comments; this caused the parser to fail and silently drop the entire `:root { ... }` block, wiping out all CSS variables and breaking the entire visual application layer. Replaced the `//` comment with a valid `/* ... */` CSS comment.
+- **Affected (files, functions, data, UI):** `public/css/app.css`.
+- **Verification evidence:** Verified that `app.css` now begins with a valid block comment and variables successfully mount to `:root`.
+- **Fix status:** Worked (2026-11-26)
+
+
 ### M3-20261126-06 — UI Framework Stability & Modal Context Fixes
 - **What / how / why:** Investigated a user report of broken UI functionality following the CRUD mappings. Discovered and resolved three major UI framework violations: (1) Replaced legacy `SR.app.flash` references with `ui.toast` natively to prevent undefined function crashes on delete actions. (2) Replaced nonexistent `ui.alert` calls with `ui.warn`. (3) Fixed destructive modal-chaining DOM behavior in `manageClasses` and `managePriceLists`. The StockRidge UI modal framework natively replaces DOM children (does not stack). Opening an "Edit" modal from inside the "Manage" modal destroyed the parent context. Rewrote the UI chaining logic to re-instantiate the parent modal transparently upon child closure, preserving state perfectly.
 - **Affected (files, functions, data, UI):** `public/js/views/customers.js`, `public/js/views/products.js`, `public/js/views/suppliers.js`, `public/js/views/admin.js`.
