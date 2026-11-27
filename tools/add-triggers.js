@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 const fs = require('fs');
 
 const file = 'schema/migrations/0001_schema.sql';

@@ -1,3 +1,4 @@
+-- PROTOCOL: Always reference the agent.md file before any further fix on this page.
 -- 0005_strict_stock_locking — Strict remote validation locking for inventory
 --
 -- This migration guarantees absolute remote validation locking on stock quantities.

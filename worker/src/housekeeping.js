@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 // =====================================================================
 // worker/src/housekeeping.js — WHAT THE CRON ACTUALLY DOES
 // =====================================================================

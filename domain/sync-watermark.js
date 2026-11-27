@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 // The pull watermark. A timestamp alone skips every other row that shares
 // that second. The page cursor is the pair (updated_at, id). The lower bound
 // sits two minutes behind the stored cursor so a write that landed while the

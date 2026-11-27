@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 
 // Builds the standalone program. Signing runs only when CSC_LINK is set to a

@@ -1,3 +1,4 @@
+-- PROTOCOL: Always reference the agent.md file before any further fix on this page.
 -- NAFDAC Greenbook rows. Reference data only. INSERT OR IGNORE so a retry after a
 -- partial apply does not duplicate a row. Ids are assigned in file order.
 

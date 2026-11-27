@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 // =====================================================================
 // public/js/state.js — WHO IS SIGNED IN, AND WHICH SHOP THEY ARE IN
 // =====================================================================

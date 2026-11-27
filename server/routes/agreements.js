@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // Hire and lease book. A row here is a promise that goods are out, not a
 // sale. Returning them, charging damage, and handing the deposit back all

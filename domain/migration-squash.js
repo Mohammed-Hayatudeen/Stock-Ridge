@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // Schema changes that used to be separate files now live in 0001_schema.sql.
 // The two catalogues stay in their own files: 0002_nigerian_market.sql and

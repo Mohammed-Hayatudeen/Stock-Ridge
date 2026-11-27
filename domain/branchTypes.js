@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 // A branch type is how that shop trades, not a second set of books.
 // RENTAL uses the hire and lease accounts that already exist: the fee is
 // income, the deposit is a liability, and the goods stay in stock until sold.

@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // server/routes/dataManagement.js — WHAT THE SHOP KEEPS, AND WHAT IT MAY LET GO

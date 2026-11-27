@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // Loaded only by the desktop window. A browser that opens the hosted site
 // does not get this file. It does not store a PIN and it does not talk to Turso.

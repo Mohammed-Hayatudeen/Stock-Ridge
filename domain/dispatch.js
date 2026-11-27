@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // domain/dispatch.js — HOW WATER AND BREAD LEAVE THE PREMISES

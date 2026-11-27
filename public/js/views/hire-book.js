@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // The book of goods that are out and must come back. A hire for Saturday and
 // a lease for a year sit in the same list, because both are promises, not sales.

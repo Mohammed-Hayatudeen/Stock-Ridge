@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // domain/access.js — THE SINGLE SOURCE OF TRUTH FOR DATA SCOPING

@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // The screen list is the same file the sidebar reads. A route that answers
 // for a screen the role cannot open is how a cashier still reads the books

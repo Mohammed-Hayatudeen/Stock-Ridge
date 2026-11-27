@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // public/js/views/admin.js — THE BUSINESS, ITS BRANCHES AND ITS CONTROLS

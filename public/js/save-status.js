@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 (function (global) {
   const SR = global.SR = global.SR || {};
   const api = requireSaveStatus();

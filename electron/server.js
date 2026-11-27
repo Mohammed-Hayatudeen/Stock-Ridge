@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // Local origin for the desktop window. Static files come from the StockRidge
 // checkout. /api is forwarded to the Worker. The Turso token never comes here.

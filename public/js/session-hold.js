@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 /* StockRidge — keep the saved till when the line returns. */
 (function (global) {
   'use strict';

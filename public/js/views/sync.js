@@ -1,3 +1,4 @@
+// PROTOCOL: Always reference the agent.md file before any further fix on this page.
 'use strict';
 // =====================================================================
 // public/js/views/sync.js — WHAT IS ON THIS DEVICE, AND WHERE IT HAS GOT TO
