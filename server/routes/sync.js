@@ -675,8 +675,18 @@ function mount(app, base = '/api') {
         if (latestRev && latestRev.max_at) {
           if (latestRev.max_at <= toUtcSql(sinceRaw)) {
             const cursor = utcNow();
+            let aloneInBusiness = false;
+            if (deviceId && biz) {
+              const activeCount = await db.scalar(
+                `SELECT COUNT(DISTINCT device_id) FROM branch_sync_status 
+                 WHERE last_heartbeat_at >= datetime('now', '-15 minutes') 
+                   AND branch_id IN (SELECT id FROM branches WHERE business_id = ?)`,
+                [String(biz)]
+              ).catch(() => 2);
+              aloneInBusiness = (activeCount <= 1);
+            }
             return ctx.json({
-              ok: true, cursor, since: sinceRaw, fullSync: false,
+              ok: true, cursor, since: sinceRaw, fullSync: false, alone: aloneInBusiness,
               tables: {}, totalRows: 0,
               message: '0 row(s) changed since ' + sinceRaw + ' (Skipped via Global Revision optimization).',
               truncatedTables: [], next: {},
@@ -933,10 +943,35 @@ function mount(app, base = '/api') {
         [String(branch.id), deviceId, strField(body.app_version, { field: 'App version', maxLength: 40 })]);
       }
     }
+    // -------------------------------------------------------------------
+    // SMART POLLING OPTIMIZATION (agent.md Protocol)
+    // -------------------------------------------------------------------
+    // We want to dramatically reduce Turso reads by pausing auto-sync pulls 
+    // entirely when this device is the ONLY active device in the entire business.
+    // If multiple branches/devices are online, it will continue to sync but ONLY
+    // read what is not saved (via the 'since' watermark incremental sync).
+    let aloneInBusiness = false;
+    if (deviceId && biz) {
+      try {
+        const activeCount = await db.scalar(
+          `SELECT COUNT(DISTINCT device_id) FROM branch_sync_status 
+           WHERE last_heartbeat_at >= datetime('now', '-15 minutes') 
+             AND branch_id IN (SELECT id FROM branches WHERE business_id = ?)`,
+          [String(biz)]
+        );
+        aloneInBusiness = (activeCount <= 1);
+      } catch (e) {
+        // Fallback to false if the query fails (e.g. migration gap)
+        aloneInBusiness = false;
+      }
+    }
+
     const revisionPayload = revisionMap ? Object.fromEntries(revisionMap) : undefined;
 
     ctx.json({
       ok: true, cursor, since: since || null, fullSync,
+      alone: aloneInBusiness,
+      tables: out,
       tables: out,
       totalRows,
       message: fullSync
@@ -1071,8 +1106,20 @@ function mount(app, base = '/api') {
           last_heartbeat_at = datetime('now'), app_version = COALESCE(excluded.app_version, app_version),
           pending_push_count = excluded.pending_push_count, updated_at = datetime('now')`,
     [String(branch.id), deviceId, strField(body.app_version, { field: 'App version', maxLength: 40 }), Number(body.pending_push_count) || 0]);
+    
+    let aloneInBusiness = false;
+    if (deviceId && branch.business_id) {
+      const activeCount = await db.scalar(
+        `SELECT COUNT(DISTINCT device_id) FROM branch_sync_status 
+         WHERE last_heartbeat_at >= datetime('now', '-15 minutes') 
+           AND branch_id IN (SELECT id FROM branches WHERE business_id = ?)`,
+        [String(branch.business_id)]
+      ).catch(() => 2);
+      aloneInBusiness = (activeCount <= 1);
+    }
+
     ctx.json({
-      ok: true,
+      ok: true, alone: aloneInBusiness,
       serverTime: watNow(), serverDate: watToday(),
       // The server's clock is returned so the device can measure its own skew
       // and warn the user, rather than silently queueing sales with future

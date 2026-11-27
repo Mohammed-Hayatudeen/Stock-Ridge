@@ -6,6 +6,13 @@
 
 ## Change Register
 
+### M3-20261126-04 — "Smart Polling" Turso Reads Optimization
+- **What / how / why:** Addressed a critical scale architecture concern regarding the Turso Free Tier read capacity. Previously, the PWA client blindly polled the database via `/api/sync/pull` every 3 minutes. Even with global revision optimizations, this incurred unnecessary reads. Implemented a Smart Polling Protocol: the server now natively tracks the number of active distinct `device_id` footprints across the business inside `branch_sync_status` using a 15-minute rolling heartbeat window. If a device is alone (`activeCount <= 1`), the backend returns `alone: true`, and the frontend explicitly halts all background interval polling, dropping idle background reads to strictly zero. The device falls back to lightweight `heartbeat()` pulses. When a second device or branch logs in, the heartbeat alerts the first device, which instantly wakes up and resumes its incremental sync watermarks, reading only what is newly mutated.
+- **Affected (files, functions, data, UI):** `public/js/sync.js`, `server/routes/sync.js`.
+- **Verification evidence:** Verified that background `pull({ full: false })` skips execution seamlessly when `aloneInBusiness` flags true. Validated heartbeat maintains presence.
+- **Fix status:** Worked (2026-11-26)
+
+
 ### M3-20261126-03 — Schema-wide API Mappings & Full Frontend Parity Check
 - **What / how / why:** Deployed a strict structural trace comparing all endpoints defined natively in the schema (`0001_schema.sql`) against backend Express endpoints and frontend fetch handlers. Discovered several endpoints missed full UI integration despite existing securely on the backend (e.g., `delBiz`, `delProduct`, `delSupplier`). Successfully matched every frontend path against the Express router tree. The UI perfectly matches the backend capabilities down to precise URL encoding loops.
 - **Affected (files, functions, data, UI):** `public/js/views/customers.js`, `public/js/views/products.js`, `public/js/views/suppliers.js`, `public/js/views/admin.js`.
