@@ -972,7 +972,6 @@ function mount(app, base = '/api') {
       ok: true, cursor, since: since || null, fullSync,
       alone: aloneInBusiness,
       tables: out,
-      tables: out,
       totalRows,
       message: fullSync
         ? `Full sync: ${totalRows} row(s) across ${Object.keys(out).filter((k) => out[k].count).length} table(s). This is everything this device is allowed to see.`
